@@ -131,6 +131,13 @@
   }
   #netStatus { opacity: 0.85; }
   #netStatus b { color: #ffe27a; letter-spacing: 3px; font-size: 14px; }
+  #stats {
+    font-size: 12px;
+    opacity: 0.7;
+    letter-spacing: 0.5px;
+    min-height: 15px;
+    margin-top: -4px;
+  }
 
   /* ---- Touch controls: hidden on desktop, shown on touch devices ---- */
   #touchControls {
@@ -197,6 +204,7 @@
     <div class="score p1"><span class="dot"></span><span id="s1">0</span> Blue</div>
     <div class="score p2"><span id="s2">0</span> Red <span class="dot"></span></div>
   </div>
+  <div id="stats"></div>
 
   <div id="wrap">
     <canvas id="game"></canvas>
@@ -1116,6 +1124,34 @@
     keys["w"] = true;                              // drive forward while pushed
     keys["s"] = false;
   }
+
+  // ---- Live stats badge: visitors + online now (polls /api/presence) ----
+  const statsEl = document.getElementById("stats");
+  let visitorIsNew = false;
+  try {
+    if (!localStorage.getItem("tm_vid")) {
+      visitorIsNew = true;
+      localStorage.setItem("tm_vid", Math.random().toString(36).slice(2) + Date.now().toString(36));
+    }
+  } catch (_) {}
+  const presenceId = Math.random().toString(36).slice(2);
+  let statsFirstPing = true;
+  async function pingStats() {
+    try {
+      const markNew = statsFirstPing && visitorIsNew ? 1 : 0;
+      const r = await fetch("/api/presence?id=" + presenceId + "&new=" + markNew, { cache: "no-store" });
+      const d = await r.json();
+      statsFirstPing = false;
+      if (d && d.online != null) {
+        statsEl.style.display = "";
+        statsEl.textContent = "🟢 " + d.online + " online · " + (d.total || 0) + " visits";
+      } else {
+        statsEl.style.display = "none";   // backend not configured -> hide badge
+      }
+    } catch (_) { /* network blip: keep last shown */ }
+  }
+  pingStats();
+  setInterval(pingStats, 20000);
 
   // ---- Boot ----
   // A "?room=CODE" link (shared by a host) drops the friend straight into joining.
