@@ -791,14 +791,35 @@
     return s;
   }
 
+  // Fetch TURN credentials from our serverless function once per session.
+  // TURN relays traffic when direct P2P can't punch through NAT (mobile/CGNAT).
+  // Falls back to STUN-only if the endpoint is missing (same-network still works).
+  const STUN_ONLY = [{ urls: "stun:stun.l.google.com:19302" }];
+  let cachedIce = null;
+  async function getIceServers() {
+    if (cachedIce) return cachedIce;
+    try {
+      const r = await fetch("/api/turn", { cache: "no-store" });
+      if (r.ok) {
+        const data = await r.json();
+        let ice = data.iceServers;
+        if (ice && !Array.isArray(ice)) ice = [ice];
+        if (Array.isArray(ice) && ice.length) { cachedIce = ice; return ice; }
+      }
+    } catch (_) {}
+    cachedIce = STUN_ONLY;
+    return cachedIce;
+  }
+
   let hostRetries = 0;
-  function startHost() {
+  async function startHost() {
     if (!window.Peer) { setNetStatus("Online needs internet — PeerJS didn't load."); return; }
     teardownNet();
     mode = "lobby"; setActiveBtns(); setControlsLegend();
-    const code = makeCode();
     setNetStatus("Starting…");
-    peer = new Peer("tankmaze-" + code);
+    const ice = await getIceServers();
+    const code = makeCode();
+    peer = new Peer("tankmaze-" + code, { config: { iceServers: ice } });
     peer.on("open", () => {
       hostRetries = 0;
       roomCode = code;
@@ -834,14 +855,15 @@
     });
   }
 
-  function startGuest(raw) {
+  async function startGuest(raw) {
     if (!window.Peer) { setNetStatus("Online needs internet — PeerJS didn't load."); return; }
     const code = (raw || "").trim().toUpperCase();
     if (code.length !== 4) { setNetStatus("Enter the 4-character code."); return; }
     teardownNet();
     mode = "lobby"; setActiveBtns(); setControlsLegend();
     setNetStatus("Connecting to " + code + "…");
-    peer = new Peer();
+    const ice = await getIceServers();
+    peer = new Peer(undefined, { config: { iceServers: ice } });
     peer.on("open", () => {
       role = "guest";
       const c = peer.connect("tankmaze-" + code, { reliable: true });
