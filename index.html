@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Tank Maze Duel</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
   :root {
     --bg: #11150f;
@@ -98,6 +99,31 @@
     padding: 1px 5px;
     font-size: 11px;
   }
+  #onlinePanel {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 600px;
+  }
+  #joinCode {
+    background: #222a1a;
+    color: var(--ink);
+    border: 1px solid #4f6238;
+    border-radius: 4px;
+    padding: 6px 10px;
+    width: 86px;
+    font-family: inherit;
+    font-size: 14px;
+    letter-spacing: 4px;
+    text-align: center;
+    text-transform: uppercase;
+  }
+  #netStatus { opacity: 0.85; }
+  #netStatus b { color: #ffe27a; letter-spacing: 3px; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -111,13 +137,22 @@
     <canvas id="game"></canvas>
     <div id="banner">
       <div class="big" id="bannerBig"></div>
-      <div class="sub">Press <kbd>Space</kbd> or <kbd>Enter</kbd> to play next round</div>
+      <div class="sub" id="bannerSub">Press <kbd>Space</kbd> or <kbd>Enter</kbd> to play next round</div>
     </div>
   </div>
 
   <div id="modebar">
     <button id="modeAI" class="active">VS Computer</button>
     <button id="mode2P">2 Players</button>
+    <button id="modeOnline">Online</button>
+  </div>
+
+  <div id="onlinePanel">
+    <button id="hostBtn">Host Game</button>
+    <span style="opacity:0.6">or join:</span>
+    <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
+    <button id="joinBtn">Join</button>
+    <span id="netStatus"></span>
   </div>
 
   <div id="controls">
@@ -163,6 +198,7 @@
 
   const banner = document.getElementById("banner");
   const bannerBig = document.getElementById("bannerBig");
+  const bannerSub = document.getElementById("bannerSub");
   const s1El = document.getElementById("s1");
   const s2El = document.getElementById("s2");
 
@@ -204,13 +240,27 @@
   const FIRE1 = " ";
   const FIRE2 = "enter";
   window.addEventListener("keydown", (e) => {
+    // don't hijack typing in the room-code field
+    if (e.target && e.target.tagName === "INPUT") return;
     const k = e.key.toLowerCase();
     if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k))
       e.preventDefault();
     keys[k] = true;
-    if (roundOver && (k === " " || k === "enter")) startRound();
+    const restartKey = k === " " || k === "enter";
+    if (restartKey && roundOver) {
+      if (mode === "guest") {
+        guestSuppressFire = true;          // don't auto-fire the round-start press
+        netSend({ t: "start" });           // only host owns startRound
+      } else if (mode === "ai" || mode === "2p" || mode === "host") {
+        startRound();
+      }
+    }
   });
-  window.addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+  window.addEventListener("keyup", (e) => {
+    const k = e.key.toLowerCase();
+    keys[k] = false;
+    if (k === " ") guestSuppressFire = false;
+  });
 
   // ---- Tank ----
   const TANK_R = TILE * 0.34;
@@ -294,13 +344,21 @@
   }
 
   // ---- Game state ----
-  let mode = "ai"; // "ai" | "2p"
+  // modes: "ai" | "2p" | "lobby" (online, not connected) | "host" | "guest"
+  let mode = "ai";
   const blue = new Tank("blue", true);
   const red = new Tank("red", false);
   let bullets = [];
   let roundOver = false;
+  let lastWinner = null;        // "blue" | "red" | "draw" | null  (synced to guest)
   let score1 = 0, score2 = 0;
   let endTimer = 0;
+
+  // ---- Net state ----
+  let peer = null, conn = null, role = null;   // role: "host" | "guest"
+  let guestSuppressFire = false;               // guest: swallow the round-start Space
+  // remote player's input, applied host-side to the red tank
+  const guestInput = { fwd: false, back: false, left: false, right: false, fire: false };
 
   function farPair() {
     // pick two floor cells with large separation
@@ -320,20 +378,32 @@
     red.reset(b);
     bullets = [];
     roundOver = false;
+    lastWinner = null;
     endTimer = 0;
     keys[" "] = false;       // consume the Space/Enter that started the round
     keys["enter"] = false;   // so the fresh tank doesn't fire on spawn
+    guestInput.fire = false; // same for the remote player's spawn press
     banner.classList.remove("show");
   }
 
   function endRound(winner) {
     if (roundOver) return;
     roundOver = true;
-    if (winner === "blue") { score1++; bannerBig.textContent = "BLUE WINS"; bannerBig.style.color = "var(--p1)"; }
-    else if (winner === "red") { score2++; bannerBig.textContent = (mode === "ai" ? "YOU LOSE" : "RED WINS"); bannerBig.style.color = "var(--p2)"; }
-    else { bannerBig.textContent = "DRAW"; bannerBig.style.color = "var(--ink)"; }
+    lastWinner = winner;
+    if (winner === "blue") score1++;
+    else if (winner === "red") score2++;
     s1El.textContent = score1;
     s2El.textContent = score2;
+    showResult(winner);
+  }
+
+  // Banner text for a finished round (host shows it locally; guest shows it
+  // from the synced winner — neutral wording so it reads right on both ends).
+  function showResult(winner) {
+    if (winner === "blue") { bannerBig.textContent = "BLUE WINS"; bannerBig.style.color = "var(--p1)"; }
+    else if (winner === "red") { bannerBig.textContent = (mode === "ai" ? "YOU LOSE" : "RED WINS"); bannerBig.style.color = "var(--p2)"; }
+    else { bannerBig.textContent = "DRAW"; bannerBig.style.color = "var(--ink)"; }
+    bannerSub.innerHTML = 'Press <kbd>Space</kbd> or <kbd>Enter</kbd> to play next round';
     banner.classList.add("show");
   }
 
@@ -398,13 +468,22 @@
   }
 
   // ---- Player control ----
-  function updatePlayer(tank, dt, kFwd, kBack, kLeft, kRight, kFire) {
+  // Read a normalized input struct off the global keyboard for a given keymap.
+  function readInput(kFwd, kBack, kLeft, kRight, kFire) {
+    return {
+      fwd: !!keys[kFwd], back: !!keys[kBack],
+      left: !!keys[kLeft], right: !!keys[kRight], fire: !!keys[kFire],
+    };
+  }
+  // Apply a normalized input struct to a tank. Used identically for local
+  // players and for the remote (guest) player on the host's simulation.
+  function driveTank(tank, dt, inp) {
     if (!tank.alive) return;
-    if (keys[kLeft]) tank.angle -= TANK_TURN * dt;
-    if (keys[kRight]) tank.angle += TANK_TURN * dt;
-    if (keys[kFwd]) tank.tryMove(TANK_SPEED * dt);
-    if (keys[kBack]) tank.tryMove(-TANK_SPEED * dt * 0.6);
-    if (keys[kFire]) tank.fire(bullets);
+    if (inp.left) tank.angle -= TANK_TURN * dt;
+    if (inp.right) tank.angle += TANK_TURN * dt;
+    if (inp.fwd) tank.tryMove(TANK_SPEED * dt);
+    if (inp.back) tank.tryMove(-TANK_SPEED * dt * 0.6);
+    if (inp.fire) tank.fire(bullets);
   }
 
   function tankHit(bullet, tank) {
@@ -421,11 +500,15 @@
     blue.cooldown = Math.max(0, blue.cooldown - dt);
     red.cooldown = Math.max(0, red.cooldown - dt);
 
-    updatePlayer(blue, dt, "w", "s", "a", "d", FIRE1);
+    // Blue is the local player in ai / 2p / host. (Guest never runs update.)
+    driveTank(blue, dt, readInput("w", "s", "a", "d", FIRE1));
+
     if (mode === "2p")
-      updatePlayer(red, dt, "arrowup", "arrowdown", "arrowleft", "arrowright", FIRE2);
+      driveTank(red, dt, readInput("arrowup", "arrowdown", "arrowleft", "arrowright", FIRE2));
+    else if (mode === "host")
+      driveTank(red, dt, guestInput);          // remote friend's tank
     else
-      updateAI(dt);
+      updateAI(dt);                            // mode === "ai"
 
     for (const b of bullets) {
       b.step(dt);
@@ -516,30 +599,247 @@
 
   // ---- Main loop ----
   let last = performance.now();
+  let netAccum = 0;
   function frame(now) {
     let dt = (now - last) / 1000;
     last = now;
     if (dt > 0.05) dt = 0.05; // clamp big tab-switch gaps
-    update(dt);
+
+    if (mode === "host") {
+      update(dt);
+      // stream state ~40Hz (cheaper than 60, still smooth)
+      netAccum += dt;
+      if (netAccum >= 0.025) { netAccum = 0; sendState(); }
+    } else if (mode === "guest") {
+      sendInput();        // guest only sends input; render uses last packet
+    } else if (mode !== "lobby") {
+      update(dt);         // ai / 2p
+    }
+    // lobby: no simulation, just render the frozen board
+
     render();
     requestAnimationFrame(frame);
   }
 
-  // ---- Mode buttons ----
+  // ---- Networking (host-authoritative WebRTC via PeerJS) ----
+  // Host runs the whole simulation and owns Blue; the guest owns Red, sends its
+  // key presses, and just renders whatever state the host streams back.
+  function netSend(obj) {
+    if (conn && conn.open) { try { conn.send(obj); } catch (e) {} }
+  }
+
+  function sendState() {
+    if (!conn || !conn.open) return;
+    netSend({
+      t: "s",
+      bx: Math.round(blue.x), by: Math.round(blue.y), ba: +blue.angle.toFixed(3), bA: blue.alive,
+      rx: Math.round(red.x), ry: Math.round(red.y), ra: +red.angle.toFixed(3), rA: red.alive,
+      bl: bullets.map((b) => [Math.round(b.x), Math.round(b.y)]),
+      s1: score1, s2: score2, ro: roundOver, w: lastWinner,
+    });
+  }
+
+  function sendInput() {
+    if (!conn || !conn.open) return;
+    netSend({
+      t: "i",
+      f: !!keys["w"], b: !!keys["s"], l: !!keys["a"], r: !!keys["d"],
+      x: !!keys[" "] && !guestSuppressFire,
+    });
+  }
+
+  function applyState(m) {
+    blue.x = m.bx; blue.y = m.by; blue.angle = m.ba; blue.alive = m.bA;
+    red.x = m.rx; red.y = m.ry; red.angle = m.ra; red.alive = m.rA;
+    bullets = (m.bl || []).map(([x, y]) => ({ x, y }));
+    if (m.s1 !== score1) { score1 = m.s1; s1El.textContent = score1; }
+    if (m.s2 !== score2) { score2 = m.s2; s2El.textContent = score2; }
+    roundOver = m.ro;
+    if (m.ro) showResult(m.w);
+    else banner.classList.remove("show");
+  }
+
+  function onData(msg) {
+    if (!msg || typeof msg !== "object") return;
+    if (role === "host") {
+      if (msg.t === "i") {
+        guestInput.fwd = !!msg.f; guestInput.back = !!msg.b;
+        guestInput.left = !!msg.l; guestInput.right = !!msg.r; guestInput.fire = !!msg.x;
+      } else if (msg.t === "start") {
+        if (roundOver) startRound();          // host owns the restart
+      }
+    } else if (role === "guest") {
+      if (msg.t === "s") applyState(msg);
+    }
+  }
+
+  function bindConn(c, onOpen) {
+    conn = c;
+    c.on("open", onOpen);
+    c.on("data", onData);
+    c.on("close", onConnClose);
+    c.on("error", () => setNetStatus('<span style="color:var(--p2)">Connection error</span>'));
+  }
+
+  function onConnClose() {
+    conn = null;
+    guestInput.fwd = guestInput.back = guestInput.left = guestInput.right = guestInput.fire = false;
+    mode = "lobby";
+    setActiveBtns(); setControlsLegend();
+    bannerBig.textContent = "DISCONNECTED";
+    bannerBig.style.color = "var(--p2)";
+    bannerSub.innerHTML = "Friend disconnected. Host again or join a new game.";
+    banner.classList.add("show");
+    setNetStatus("");
+  }
+
+  function teardownNet() {
+    if (conn) { try { conn.close(); } catch (e) {} conn = null; }
+    if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
+    role = null;
+  }
+
+  function makeCode() {
+    const C = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // omit easily-confused chars
+    let s = "";
+    for (let i = 0; i < 4; i++) s += C[(Math.random() * C.length) | 0];
+    return s;
+  }
+
+  let hostRetries = 0;
+  function startHost() {
+    if (!window.Peer) { setNetStatus("Online needs internet — PeerJS didn't load."); return; }
+    teardownNet();
+    mode = "lobby"; setActiveBtns(); setControlsLegend();
+    const code = makeCode();
+    setNetStatus("Starting…");
+    peer = new Peer("tankmaze-" + code);
+    peer.on("open", () => {
+      hostRetries = 0;
+      setNetStatus('Your code: <b>' + code + '</b> — share it. Waiting…');
+      bannerBig.textContent = "ROOM " + code;
+      bannerBig.style.color = "var(--p1)";
+      bannerSub.innerHTML =
+        'Share code <b style="color:#ffe27a;letter-spacing:3px">' + code +
+        '</b> with your friend.<br/>Waiting for them to join…';
+      banner.classList.add("show");
+    });
+    peer.on("connection", (c) => {
+      role = "host";
+      bindConn(c, () => {
+        mode = "host"; setActiveBtns(); setControlsLegend();
+        setNetStatus('Connected! You are <b style="color:var(--p1)">BLUE</b>.');
+        resetScores();
+        startRound();
+      });
+    });
+    peer.on("error", (e) => {
+      const type = (e && e.type) || "network";
+      if (type === "unavailable-id" && hostRetries < 5) {
+        hostRetries++;                          // stale id on broker — fresh code
+        setNetStatus("Code busy, retrying…");
+        startHost();
+      } else {
+        setNetStatus('<span style="color:var(--p2)">Error: ' + type + '</span>');
+      }
+    });
+  }
+
+  function startGuest(raw) {
+    if (!window.Peer) { setNetStatus("Online needs internet — PeerJS didn't load."); return; }
+    const code = (raw || "").trim().toUpperCase();
+    if (code.length !== 4) { setNetStatus("Enter the 4-character code."); return; }
+    teardownNet();
+    mode = "lobby"; setActiveBtns(); setControlsLegend();
+    setNetStatus("Connecting to " + code + "…");
+    peer = new Peer();
+    peer.on("open", () => {
+      role = "guest";
+      const c = peer.connect("tankmaze-" + code, { reliable: true });
+      bindConn(c, () => {
+        mode = "guest"; setActiveBtns(); setControlsLegend();
+        setNetStatus('Connected! You are <b style="color:var(--p2)">RED</b>.');
+        banner.classList.remove("show");
+      });
+    });
+    peer.on("error", (e) => {
+      let type = (e && e.type) || "network";
+      if (type === "peer-unavailable") type = "no room with that code";
+      setNetStatus('<span style="color:var(--p2)">' + type + '</span>');
+    });
+  }
+
+  // ---- Mode buttons + UI ----
   const modeAIBtn = document.getElementById("modeAI");
   const mode2PBtn = document.getElementById("mode2P");
-  const redControls = document.getElementById("redControls");
-  function setMode(m) {
-    mode = m;
-    modeAIBtn.classList.toggle("active", m === "ai");
-    mode2PBtn.classList.toggle("active", m === "2p");
-    redControls.style.opacity = m === "2p" ? "1" : "0.35";
+  const modeOnlineBtn = document.getElementById("modeOnline");
+  const onlinePanel = document.getElementById("onlinePanel");
+  const hostBtn = document.getElementById("hostBtn");
+  const joinBtn = document.getElementById("joinBtn");
+  const joinCode = document.getElementById("joinCode");
+  const netStatus = document.getElementById("netStatus");
+  const controlsEl = document.getElementById("controls");
+  const controlsDefault = controlsEl.innerHTML;
+
+  function setNetStatus(html) { netStatus.innerHTML = html; }
+
+  function resetScores() {
     score1 = 0; score2 = 0;
     s1El.textContent = 0; s2El.textContent = 0;
-    startRound();
+    lastWinner = null;
   }
+
+  function setActiveBtns() {
+    const online = mode === "lobby" || mode === "host" || mode === "guest";
+    modeAIBtn.classList.toggle("active", mode === "ai");
+    mode2PBtn.classList.toggle("active", mode === "2p");
+    modeOnlineBtn.classList.toggle("active", online);
+    onlinePanel.style.display = online ? "flex" : "none";
+  }
+
+  function setControlsLegend() {
+    if (mode === "host" || mode === "guest") {
+      const who = mode === "host" ? "BLUE" : "RED";
+      const col = mode === "host" ? "--p1" : "--p2";
+      controlsEl.innerHTML =
+        '<div>You are <b style="color:var(' + col + ')">' + who + '</b> &nbsp;' +
+        '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &middot; <kbd>Space</kbd> fire' +
+        ' &middot; opponent is the other tank</div>';
+    } else {
+      controlsEl.innerHTML = controlsDefault;
+      const rc = document.getElementById("redControls");
+      if (rc) rc.style.opacity = mode === "2p" ? "1" : "0.35";
+    }
+  }
+
+  // Local modes (ai / 2p) and the online lobby.
+  function setMode(m) {
+    teardownNet();
+    mode = m;
+    setActiveBtns();
+    setControlsLegend();
+    if (m === "lobby") {
+      setNetStatus("");
+      joinCode.value = "";
+      resetScores();
+      bannerBig.textContent = "ONLINE";
+      bannerBig.style.color = "var(--ink)";
+      bannerSub.innerHTML = "Host a game and share the code, or enter a friend's code to join.";
+      banner.classList.add("show");
+    } else {
+      resetScores();
+      startRound();
+    }
+  }
+
   modeAIBtn.addEventListener("click", () => setMode("ai"));
   mode2PBtn.addEventListener("click", () => setMode("2p"));
+  modeOnlineBtn.addEventListener("click", () => setMode("lobby"));
+  hostBtn.addEventListener("click", () => { startHost(); hostBtn.blur(); });
+  joinBtn.addEventListener("click", () => { startGuest(joinCode.value); joinBtn.blur(); });
+  joinCode.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { startGuest(joinCode.value); joinCode.blur(); }
+  });
 
   // ---- Boot ----
   setMode("ai");
