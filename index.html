@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <title>rete kebe fire!</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232b3622'/%3E%3Crect x='3' y='6' width='8' height='5' fill='%234fa3ff'/%3E%3Crect x='9' y='7.5' width='5' height='1.6' fill='%23e9efe0'/%3E%3C/svg%3E" />
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
@@ -52,8 +52,15 @@
     border: 2px solid #2c3622;
     border-radius: 6px;
     box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    width: min(94vw, 56vh, 612px);   /* scale to fit phone screens, cap at native */
   }
-  canvas { display: block; border-radius: 4px; }
+  canvas {
+    display: block;
+    border-radius: 4px;
+    width: 100%;
+    height: auto;                    /* square maze keeps 1:1 from intrinsic size */
+    touch-action: none;
+  }
   #banner {
     position: absolute;
     inset: 0;
@@ -124,6 +131,62 @@
   }
   #netStatus { opacity: 0.85; }
   #netStatus b { color: #ffe27a; letter-spacing: 3px; font-size: 14px; }
+
+  /* ---- Touch controls: hidden on desktop, shown on touch devices ---- */
+  #touchControls {
+    display: none;
+    width: min(94vw, 612px);
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    touch-action: none;
+  }
+  #dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 56px);
+    grid-template-rows: repeat(2, 56px);
+    gap: 6px;
+  }
+  #dpad .tbtn { grid-column: auto; }
+  #bUp { grid-column: 2; grid-row: 1; }
+  #bLeft { grid-column: 1; grid-row: 2; }
+  #bDown { grid-column: 2; grid-row: 2; }
+  #bRight { grid-column: 3; grid-row: 2; }
+  .tbtn {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+    user-select: none;
+    background: #2c3622;
+    border: 1px solid #4f6238;
+    border-radius: 10px;
+    color: var(--ink);
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .tbtn:active { background: #4f6238; }
+  #fireBtn {
+    width: 92px;
+    height: 92px;
+    border-radius: 50%;
+    font-size: 16px;
+    letter-spacing: 2px;
+    font-weight: 600;
+    background: #5a2a22;
+    border-color: var(--p2);
+    color: #ffd9cf;
+  }
+  #fireBtn:active { background: var(--p2); color: #11150f; }
+
+  @media (pointer: coarse) {
+    body { gap: 8px; padding: 6px 0; justify-content: flex-start; }
+    h1 { font-size: 15px; margin-top: 4px; }
+    #touchControls { display: flex; }
+    #controls { display: none; }   /* keyboard legend irrelevant on phones */
+    button { padding: 8px 12px; }  /* bigger tap targets for mode/online */
+  }
 </style>
 </head>
 <body>
@@ -159,6 +222,16 @@
   <div id="controls">
     <div><b>Blue</b> &nbsp; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &middot; <kbd>Space</kbd> fire</div>
     <div id="redControls"><b>Red</b> &nbsp; <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> move &middot; <kbd>Enter</kbd> fire</div>
+  </div>
+
+  <div id="touchControls">
+    <div id="dpad">
+      <button class="tbtn" id="bUp" data-k="w" aria-label="forward">▲</button>
+      <button class="tbtn" id="bLeft" data-k="a" aria-label="turn left">◀</button>
+      <button class="tbtn" id="bDown" data-k="s" aria-label="reverse">▼</button>
+      <button class="tbtn" id="bRight" data-k="d" aria-label="turn right">▶</button>
+    </div>
+    <button id="fireBtn" aria-label="fire">FIRE</button>
   </div>
 
 <script>
@@ -247,21 +320,24 @@
     if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k))
       e.preventDefault();
     keys[k] = true;
-    const restartKey = k === " " || k === "enter";
-    if (restartKey && roundOver) {
-      if (mode === "guest") {
-        guestSuppressFire = true;          // don't auto-fire the round-start press
-        netSend({ t: "start" });           // only host owns startRound
-      } else if (mode === "ai" || mode === "2p" || mode === "host") {
-        startRound();
-      }
-    }
+    if ((k === " " || k === "enter") && roundOver) handleFirePress();
   });
   window.addEventListener("keyup", (e) => {
     const k = e.key.toLowerCase();
     keys[k] = false;
     if (k === " ") guestSuppressFire = false;
   });
+
+  // The "fire" action also restarts a finished round. Shared by keyboard + touch.
+  function handleFirePress() {
+    if (!roundOver) return;
+    if (mode === "guest") {
+      guestSuppressFire = true;            // don't auto-fire the round-start press
+      netSend({ t: "start" });             // only host owns startRound
+    } else if (mode === "ai" || mode === "2p" || mode === "host") {
+      startRound();
+    }
+  }
 
   // ---- Tank ----
   const TANK_R = TILE * 0.34;
@@ -866,6 +942,32 @@
       setNetStatus('Share this link: ' + joinUrl);   // non-secure context fallback
     }
   });
+
+  // ---- Touch controls (phones): drive the same key state as the keyboard ----
+  // Pointer events cover touch+mouse; setPointerCapture keeps the release bound
+  // to the button even if the finger slides off, and lets multiple fingers
+  // (move + fire) work at once.
+  function bindHold(el, key) {
+    const down = (e) => {
+      e.preventDefault();
+      keys[key] = true;
+      if (e.pointerId != null && el.setPointerCapture) {
+        try { el.setPointerCapture(e.pointerId); } catch (_) {}
+      }
+      if (key === " ") handleFirePress();   // fire also restarts a finished round
+    };
+    const up = (e) => {
+      if (e) e.preventDefault();
+      keys[key] = false;
+      if (key === " ") guestSuppressFire = false;
+    };
+    el.addEventListener("pointerdown", down);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+    el.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
+  document.querySelectorAll("#dpad .tbtn").forEach((b) => bindHold(b, b.dataset.k));
+  bindHold(document.getElementById("fireBtn"), " ");
 
   // ---- Boot ----
   // A "?room=CODE" link (shared by a host) drops the friend straight into joining.
