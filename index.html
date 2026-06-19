@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Tank Maze Duel</title>
+<title>rete kebe fire!</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232b3622'/%3E%3Crect x='3' y='6' width='8' height='5' fill='%234fa3ff'/%3E%3Crect x='9' y='7.5' width='5' height='1.6' fill='%23e9efe0'/%3E%3C/svg%3E" />
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
@@ -36,7 +36,6 @@
     font-size: 18px;
     letter-spacing: 3px;
     font-weight: 600;
-    text-transform: uppercase;
   }
   #scoreboard {
     display: flex;
@@ -128,7 +127,7 @@
 </style>
 </head>
 <body>
-  <h1>Tank Maze Duel</h1>
+  <h1>rete kebe fire!</h1>
   <div id="scoreboard">
     <div class="score p1"><span class="dot"></span><span id="s1">0</span> Blue</div>
     <div class="score p2"><span id="s2">0</span> Red <span class="dot"></span></div>
@@ -268,10 +267,10 @@
   const TANK_R = TILE * 0.34;
   const TANK_SPEED = 95;          // px/sec
   const TANK_TURN = 3.0;          // rad/sec
-  const RELOAD = 0.22;            // sec between shots (rapid fire — hold Space)
+  const RELOAD = 0.65;            // sec between shots
   const BULLET_SPEED = 230;       // px/sec
   const BULLET_R = 3.5;
-  const BULLET_LIFE = 2.5;        // sec (shorter so rapid fire doesn't flood the maze)
+  const BULLET_LIFE = 4.0;        // sec
   const MAX_BOUNCE = 2;
 
   class Tank {
