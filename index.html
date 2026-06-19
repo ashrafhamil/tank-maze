@@ -360,7 +360,7 @@
   let peer = null, conn = null, role = null;   // role: "host" | "guest"
   let guestSuppressFire = false;               // guest: swallow the round-start Space
   let lastPeerMsg = 0;                          // perf-time of last packet from the other side
-  const STALE_MS = 3500;                        // no packets this long => treat as disconnected
+  const STALE_MS = 10000;                       // no packets this long => treat as disconnected
   let roomCode = "", joinUrl = "";              // current hosted room + its shareable link
   // remote player's input, applied host-side to the red tank
   const guestInput = { fwd: false, back: false, left: false, right: false, fire: false };
