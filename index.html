@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Tank Maze Duel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232b3622'/%3E%3Crect x='3' y='6' width='8' height='5' fill='%234fa3ff'/%3E%3Crect x='9' y='7.5' width='5' height='1.6' fill='%23e9efe0'/%3E%3C/svg%3E" />
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
   :root {
@@ -357,6 +358,8 @@
   // ---- Net state ----
   let peer = null, conn = null, role = null;   // role: "host" | "guest"
   let guestSuppressFire = false;               // guest: swallow the round-start Space
+  let lastPeerMsg = 0;                          // perf-time of last packet from the other side
+  const STALE_MS = 3500;                        // no packets this long => treat as disconnected
   // remote player's input, applied host-side to the red tank
   const guestInput = { fwd: false, back: false, left: false, right: false, fire: false };
 
@@ -605,6 +608,10 @@
     last = now;
     if (dt > 0.05) dt = 0.05; // clamp big tab-switch gaps
 
+    // backstop for PeerJS's unreliable close event: no packets => disconnected
+    if ((mode === "host" || mode === "guest") && conn && now - lastPeerMsg > STALE_MS)
+      handleDisconnect();
+
     if (mode === "host") {
       update(dt);
       // stream state ~40Hz (cheaper than 60, still smooth)
@@ -661,6 +668,7 @@
 
   function onData(msg) {
     if (!msg || typeof msg !== "object") return;
+    lastPeerMsg = performance.now();           // any packet => peer still alive
     if (role === "host") {
       if (msg.t === "i") {
         guestInput.fwd = !!msg.f; guestInput.back = !!msg.b;
@@ -675,13 +683,14 @@
 
   function bindConn(c, onOpen) {
     conn = c;
-    c.on("open", onOpen);
+    c.on("open", () => { lastPeerMsg = performance.now(); onOpen(); });
     c.on("data", onData);
-    c.on("close", onConnClose);
+    c.on("close", handleDisconnect);           // fires sometimes; heartbeat is the backstop
     c.on("error", () => setNetStatus('<span style="color:var(--p2)">Connection error</span>'));
   }
 
-  function onConnClose() {
+  function handleDisconnect() {
+    if (mode !== "host" && mode !== "guest") return;   // only while in a live session
     conn = null;
     guestInput.fwd = guestInput.back = guestInput.left = guestInput.right = guestInput.fire = false;
     mode = "lobby";
