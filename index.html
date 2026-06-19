@@ -153,6 +153,7 @@
     <span style="opacity:0.6">or join:</span>
     <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
     <button id="joinBtn">Join</button>
+    <button id="copyLinkBtn" style="display:none">Copy Link</button>
     <span id="netStatus"></span>
   </div>
 
@@ -360,6 +361,7 @@
   let guestSuppressFire = false;               // guest: swallow the round-start Space
   let lastPeerMsg = 0;                          // perf-time of last packet from the other side
   const STALE_MS = 3500;                        // no packets this long => treat as disconnected
+  let roomCode = "", joinUrl = "";              // current hosted room + its shareable link
   // remote player's input, applied host-side to the red tank
   const guestInput = { fwd: false, back: false, left: false, right: false, fire: false };
 
@@ -725,12 +727,16 @@
     peer = new Peer("tankmaze-" + code);
     peer.on("open", () => {
       hostRetries = 0;
-      setNetStatus('Your code: <b>' + code + '</b> — share it. Waiting…');
+      roomCode = code;
+      joinUrl = location.origin + location.pathname + "?room=" + code;
+      copyLinkBtn.style.display = "inline-block";
+      setNetStatus('Code <b>' + code + '</b> — or hit Copy Link. Waiting…');
       bannerBig.textContent = "ROOM " + code;
       bannerBig.style.color = "var(--p1)";
       bannerSub.innerHTML =
-        'Share code <b style="color:#ffe27a;letter-spacing:3px">' + code +
-        '</b> with your friend.<br/>Waiting for them to join…';
+        'Send your friend the <b style="color:#ffe27a">Copy Link</b> button below' +
+        '<br/>(or the code <b style="color:#ffe27a;letter-spacing:3px">' + code + '</b>).' +
+        '<br/>Waiting for them to join…';
       banner.classList.add("show");
     });
     peer.on("connection", (c) => {
@@ -786,6 +792,7 @@
   const hostBtn = document.getElementById("hostBtn");
   const joinBtn = document.getElementById("joinBtn");
   const joinCode = document.getElementById("joinCode");
+  const copyLinkBtn = document.getElementById("copyLinkBtn");
   const netStatus = document.getElementById("netStatus");
   const controlsEl = document.getElementById("controls");
   const controlsDefault = controlsEl.innerHTML;
@@ -824,6 +831,7 @@
   // Local modes (ai / 2p) and the online lobby.
   function setMode(m) {
     teardownNet();
+    copyLinkBtn.style.display = "none";   // only meaningful while hosting
     mode = m;
     setActiveBtns();
     setControlsLegend();
@@ -849,9 +857,27 @@
   joinCode.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { startGuest(joinCode.value); joinCode.blur(); }
   });
+  copyLinkBtn.addEventListener("click", () => {
+    const done = () => { setNetStatus('Link copied! Waiting for friend…'); copyLinkBtn.blur(); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(joinUrl).then(done, () => {
+        setNetStatus('Copy failed — link: ' + joinUrl);
+      });
+    } else {
+      setNetStatus('Share this link: ' + joinUrl);   // non-secure context fallback
+    }
+  });
 
   // ---- Boot ----
-  setMode("ai");
+  // A "?room=CODE" link (shared by a host) drops the friend straight into joining.
+  const roomParam = (new URLSearchParams(location.search).get("room") || "").trim().toUpperCase();
+  if (/^[A-Z0-9]{4}$/.test(roomParam)) {
+    setMode("lobby");
+    joinCode.value = roomParam;
+    startGuest(roomParam);
+  } else {
+    setMode("ai");
+  }
   requestAnimationFrame(frame);
 })();
 </script>
