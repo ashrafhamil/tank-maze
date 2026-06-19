@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tank Maze Duel</title>
+<style>
+  :root {
+    --bg: #11150f;
+    --wall: #5c7340;
+    --wall-edge: #7da155;
+    --floor: #2b3622;
+    --p1: #4fa3ff;
+    --p2: #ff6b4f;
+    --ink: #d8e0cc;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  h1 {
+    margin: 0;
+    font-size: 18px;
+    letter-spacing: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  #scoreboard {
+    display: flex;
+    gap: 28px;
+    font-size: 15px;
+    letter-spacing: 1px;
+  }
+  .score { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; }
+  .p1 { color: var(--p1); } .p1 .dot { background: var(--p1); }
+  .p2 { color: var(--p2); } .p2 .dot { background: var(--p2); }
+  #wrap {
+    position: relative;
+    border: 2px solid #2c3622;
+    border-radius: 6px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  canvas { display: block; border-radius: 4px; }
+  #banner {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(10,12,8,0.78);
+    border-radius: 4px;
+    text-align: center;
+  }
+  #banner.show { display: flex; }
+  #banner .big { font-size: 30px; letter-spacing: 2px; }
+  #banner .sub { font-size: 13px; opacity: 0.8; letter-spacing: 1px; }
+  #controls {
+    display: flex;
+    gap: 40px;
+    font-size: 12px;
+    opacity: 0.7;
+    letter-spacing: 0.5px;
+  }
+  #controls b { color: var(--ink); }
+  #modebar { display: flex; gap: 8px; }
+  button {
+    background: #2c3622;
+    color: var(--ink);
+    border: 1px solid #4f6238;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-family: inherit;
+    font-size: 12px;
+    letter-spacing: 1px;
+    cursor: pointer;
+    text-transform: uppercase;
+  }
+  button:hover { background: #3a4a2c; }
+  button.active { background: #4f6238; border-color: #6f8a52; }
+  kbd {
+    background: #222a1a;
+    border: 1px solid #4f6238;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+  <h1>Tank Maze Duel</h1>
+  <div id="scoreboard">
+    <div class="score p1"><span class="dot"></span><span id="s1">0</span> Blue</div>
+    <div class="score p2"><span id="s2">0</span> Red <span class="dot"></span></div>
+  </div>
+
+  <div id="wrap">
+    <canvas id="game"></canvas>
+    <div id="banner">
+      <div class="big" id="bannerBig"></div>
+      <div class="sub">Press <kbd>Space</kbd> or <kbd>Enter</kbd> to play next round</div>
+    </div>
+  </div>
+
+  <div id="modebar">
+    <button id="modeAI" class="active">VS Computer</button>
+    <button id="mode2P">2 Players</button>
+  </div>
+
+  <div id="controls">
+    <div><b>Blue</b> &nbsp; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &middot; <kbd>Space</kbd> fire</div>
+    <div id="redControls"><b>Red</b> &nbsp; <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> move &middot; <kbd>Enter</kbd> fire</div>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---- Maze layout (1 = wall, 0 = floor). Outer ring is solid. ----
+  const MAZE = [
+    "111111111111111111",
+    "100000000000000001",
+    "101111011110111101",
+    "100001000010000101",
+    "101101011010110101",
+    "101000000000010001",
+    "101011110111011101",
+    "100010000000010001",
+    "101110101110101101",
+    "100000101000101001",
+    "101111101011111101",
+    "100000001000000001",
+    "101101110111011101",
+    "101000100000100101",
+    "101011101110101101",
+    "100010000000010001",
+    "100000000000000001",
+    "111111111111111111",
+  ];
+  const ROWS = MAZE.length;
+  const COLS = MAZE[0].length;
+  const TILE = 34;
+  const W = COLS * TILE;
+  const H = ROWS * TILE;
+
+  const canvas = document.getElementById("game");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  const banner = document.getElementById("banner");
+  const bannerBig = document.getElementById("bannerBig");
+  const s1El = document.getElementById("s1");
+  const s2El = document.getElementById("s2");
+
+  // ---- Wall helpers ----
+  function isWallCell(c, r) {
+    if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return true;
+    return MAZE[r][c] === "1";
+  }
+  // Circle (tank/bullet) vs wall-cells: returns true if point/radius overlaps any wall.
+  function circleHitsWall(x, y, radius) {
+    const minC = Math.floor((x - radius) / TILE);
+    const maxC = Math.floor((x + radius) / TILE);
+    const minR = Math.floor((y - radius) / TILE);
+    const maxR = Math.floor((y + radius) / TILE);
+    for (let r = minR; r <= maxR; r++) {
+      for (let c = minC; c <= maxC; c++) {
+        if (!isWallCell(c, r)) continue;
+        const nx = Math.max(c * TILE, Math.min(x, c * TILE + TILE));
+        const ny = Math.max(r * TILE, Math.min(y, r * TILE + TILE));
+        const dx = x - nx, dy = y - ny;
+        if (dx * dx + dy * dy < radius * radius) return true;
+      }
+    }
+    return false;
+  }
+
+  // ---- Open floor cells, used to place tanks far apart ----
+  const floorCells = [];
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (MAZE[r][c] === "0") floorCells.push({ c, r });
+
+  function cellCenter(cell) {
+    return { x: cell.c * TILE + TILE / 2, y: cell.r * TILE + TILE / 2 };
+  }
+
+  // ---- Input ----
+  const keys = {};
+  const FIRE1 = " ";
+  const FIRE2 = "enter";
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k))
+      e.preventDefault();
+    keys[k] = true;
+    if (roundOver && (k === " " || k === "enter")) startRound();
+  });
+  window.addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+
+  // ---- Tank ----
+  const TANK_R = TILE * 0.34;
+  const TANK_SPEED = 95;          // px/sec
+  const TANK_TURN = 3.0;          // rad/sec
+  const RELOAD = 0.65;            // sec between shots
+  const BULLET_SPEED = 230;       // px/sec
+  const BULLET_R = 3.5;
+  const BULLET_LIFE = 4.0;        // sec
+  const MAX_BOUNCE = 2;
+
+  class Tank {
+    constructor(color, isPlayer) {
+      this.color = color;
+      this.isPlayer = isPlayer;
+      this.x = 0; this.y = 0; this.angle = 0;
+      this.cooldown = 0; this.alive = false;
+    }
+    reset(cell) {
+      const center = cellCenter(cell);
+      this.x = center.x;
+      this.y = center.y;
+      this.angle = Math.random() * Math.PI * 2;
+      this.cooldown = 0;
+      this.alive = true;
+      // AI memory
+      this.aiTurnGoal = this.angle;
+      this.aiRepathIn = 0;
+    }
+    tryMove(dist) {
+      const nx = this.x + Math.cos(this.angle) * dist;
+      const ny = this.y + Math.sin(this.angle) * dist;
+      // axis-separated so tanks slide along walls instead of sticking
+      if (!circleHitsWall(nx, this.y, TANK_R)) this.x = nx;
+      if (!circleHitsWall(this.x, ny, TANK_R)) this.y = ny;
+    }
+    canFire() { return this.cooldown <= 0; }
+    fire(bullets) {
+      if (!this.canFire()) return;
+      this.cooldown = RELOAD;
+      const mx = this.x + Math.cos(this.angle) * (TANK_R + BULLET_R + 1);
+      const my = this.y + Math.sin(this.angle) * (TANK_R + BULLET_R + 1);
+      bullets.push(new Bullet(mx, my, this.angle, this));
+    }
+  }
+
+  class Bullet {
+    constructor(x, y, angle, owner) {
+      this.x = x; this.y = y;
+      this.vx = Math.cos(angle) * BULLET_SPEED;
+      this.vy = Math.sin(angle) * BULLET_SPEED;
+      this.owner = owner;
+      this.life = BULLET_LIFE;
+      this.bounces = 0;
+      this.dead = false;
+      this.armTime = 0.06; // brief self-immunity so muzzle doesn't self-kill
+    }
+    step(dt) {
+      this.life -= dt;
+      this.armTime -= dt;
+      if (this.life <= 0) { this.dead = true; return; }
+
+      // move X, bounce on wall
+      let nx = this.x + this.vx * dt;
+      if (circleHitsWall(nx, this.y, BULLET_R)) {
+        this.vx = -this.vx;
+        nx = this.x + this.vx * dt;
+        if (++this.bounces > MAX_BOUNCE) { this.dead = true; return; }
+      }
+      this.x = nx;
+
+      // move Y, bounce on wall
+      let ny = this.y + this.vy * dt;
+      if (circleHitsWall(this.x, ny, BULLET_R)) {
+        this.vy = -this.vy;
+        ny = this.y + this.vy * dt;
+        if (++this.bounces > MAX_BOUNCE) { this.dead = true; return; }
+      }
+      this.y = ny;
+    }
+  }
+
+  // ---- Game state ----
+  let mode = "ai"; // "ai" | "2p"
+  const blue = new Tank("blue", true);
+  const red = new Tank("red", false);
+  let bullets = [];
+  let roundOver = false;
+  let score1 = 0, score2 = 0;
+  let endTimer = 0;
+
+  function farPair() {
+    // pick two floor cells with large separation
+    let best = null, bestD = -1;
+    for (let i = 0; i < 60; i++) {
+      const a = floorCells[(Math.random() * floorCells.length) | 0];
+      const b = floorCells[(Math.random() * floorCells.length) | 0];
+      const d = (a.c - b.c) ** 2 + (a.r - b.r) ** 2;
+      if (d > bestD) { bestD = d; best = [a, b]; }
+    }
+    return best;
+  }
+
+  function startRound() {
+    const [a, b] = farPair();
+    blue.reset(a);
+    red.reset(b);
+    bullets = [];
+    roundOver = false;
+    endTimer = 0;
+    keys[" "] = false;       // consume the Space/Enter that started the round
+    keys["enter"] = false;   // so the fresh tank doesn't fire on spawn
+    banner.classList.remove("show");
+  }
+
+  function endRound(winner) {
+    if (roundOver) return;
+    roundOver = true;
+    if (winner === "blue") { score1++; bannerBig.textContent = "BLUE WINS"; bannerBig.style.color = "var(--p1)"; }
+    else if (winner === "red") { score2++; bannerBig.textContent = (mode === "ai" ? "YOU LOSE" : "RED WINS"); bannerBig.style.color = "var(--p2)"; }
+    else { bannerBig.textContent = "DRAW"; bannerBig.style.color = "var(--ink)"; }
+    s1El.textContent = score1;
+    s2El.textContent = score2;
+    banner.classList.add("show");
+  }
+
+  // ---- Line-of-sight: is target visible (no wall between)? ----
+  function hasLineOfSight(ax, ay, bx, by) {
+    const dist = Math.hypot(bx - ax, by - ay);
+    const steps = Math.ceil(dist / (TILE * 0.4));
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const px = ax + (bx - ax) * t;
+      const py = ay + (by - ay) * t;
+      if (isWallCell(Math.floor(px / TILE), Math.floor(py / TILE))) return false;
+    }
+    return true;
+  }
+
+  function angleDiff(a, b) {
+    let d = (b - a) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return d;
+  }
+
+  // ---- AI for red tank ----
+  function updateAI(dt) {
+    if (!red.alive) return;
+    const dx = blue.x - red.x;
+    const dy = blue.y - red.y;
+    const targetAngle = Math.atan2(dy, dx);
+    const los = hasLineOfSight(red.x, red.y, blue.x, blue.y);
+
+    let desired;
+    if (los) {
+      // aim at player
+      desired = targetAngle;
+    } else {
+      // wander: pick a new heading periodically, prefer current direction
+      red.aiRepathIn -= dt;
+      if (red.aiRepathIn <= 0) {
+        red.aiTurnGoal = red.angle + (Math.random() - 0.5) * Math.PI * 1.2;
+        red.aiRepathIn = 0.6 + Math.random() * 0.8;
+      }
+      desired = red.aiTurnGoal;
+    }
+
+    // rotate toward desired heading
+    const diff = angleDiff(red.angle, desired);
+    const turn = TANK_TURN * dt;
+    red.angle += Math.max(-turn, Math.min(turn, diff));
+
+    // move forward; if blocked, nudge a turn so it doesn't grind a wall
+    const before = { x: red.x, y: red.y };
+    red.tryMove(TANK_SPEED * dt);
+    const moved = Math.hypot(red.x - before.x, red.y - before.y);
+    if (moved < TANK_SPEED * dt * 0.3 && !los) {
+      red.aiTurnGoal = red.angle + (Math.random() < 0.5 ? 1 : -1) * (0.7 + Math.random());
+      red.aiRepathIn = 0.5;
+    }
+
+    // fire if roughly aimed and can see player
+    if (los && Math.abs(diff) < 0.20 && red.canFire()) red.fire(bullets);
+  }
+
+  // ---- Player control ----
+  function updatePlayer(tank, dt, kFwd, kBack, kLeft, kRight, kFire) {
+    if (!tank.alive) return;
+    if (keys[kLeft]) tank.angle -= TANK_TURN * dt;
+    if (keys[kRight]) tank.angle += TANK_TURN * dt;
+    if (keys[kFwd]) tank.tryMove(TANK_SPEED * dt);
+    if (keys[kBack]) tank.tryMove(-TANK_SPEED * dt * 0.6);
+    if (keys[kFire]) tank.fire(bullets);
+  }
+
+  function tankHit(bullet, tank) {
+    if (!tank.alive) return false;
+    if (bullet.owner === tank && bullet.armTime > 0) return false;
+    const dx = bullet.x - tank.x, dy = bullet.y - tank.y;
+    return dx * dx + dy * dy < (TANK_R + BULLET_R) ** 2;
+  }
+
+  // ---- Update loop ----
+  function update(dt) {
+    if (roundOver) return;
+
+    blue.cooldown = Math.max(0, blue.cooldown - dt);
+    red.cooldown = Math.max(0, red.cooldown - dt);
+
+    updatePlayer(blue, dt, "w", "s", "a", "d", FIRE1);
+    if (mode === "2p")
+      updatePlayer(red, dt, "arrowup", "arrowdown", "arrowleft", "arrowright", FIRE2);
+    else
+      updateAI(dt);
+
+    for (const b of bullets) {
+      b.step(dt);
+      if (b.dead) continue;
+      if (tankHit(b, blue)) { blue.alive = false; b.dead = true; }
+      if (tankHit(b, red)) { red.alive = false; b.dead = true; }
+    }
+    bullets = bullets.filter((b) => !b.dead);
+
+    if (!blue.alive || !red.alive) {
+      endTimer += dt;
+      if (endTimer > 0.7) {
+        if (!blue.alive && !red.alive) endRound("draw");
+        else if (!red.alive) endRound("blue");
+        else endRound("red");
+      }
+    }
+  }
+
+  // ---- Render ----
+  function drawMaze() {
+    ctx.fillStyle = getCSS("--floor");
+    ctx.fillRect(0, 0, W, H);
+    const wall = getCSS("--wall");
+    const edge = getCSS("--wall-edge");
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (MAZE[r][c] !== "1") continue;
+        const x = c * TILE, y = r * TILE;
+        ctx.fillStyle = wall;
+        ctx.fillRect(x, y, TILE, TILE);
+        ctx.fillStyle = edge;
+        ctx.fillRect(x, y, TILE, 3);
+        ctx.fillRect(x, y, 3, TILE);
+      }
+    }
+  }
+
+  function drawTank(t) {
+    if (!t.alive) return;
+    const main = t.color === "blue" ? getCSS("--p1") : getCSS("--p2");
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.angle);
+    // body
+    ctx.fillStyle = main;
+    const s = TANK_R;
+    ctx.fillRect(-s, -s * 0.85, s * 2, s * 1.7);
+    // treads
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(-s, -s * 0.95, s * 2, s * 0.28);
+    ctx.fillRect(-s, s * 0.67, s * 2, s * 0.28);
+    // barrel
+    ctx.fillStyle = "#e9efe0";
+    ctx.fillRect(s * 0.2, -s * 0.18, s * 1.5, s * 0.36);
+    // turret
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.6, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBullet(b) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, BULLET_R, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffe27a";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.4)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  function render() {
+    drawMaze();
+    bullets.forEach(drawBullet);
+    drawTank(blue);
+    drawTank(red);
+  }
+
+  // CSS var reader (cached)
+  const cssCache = {};
+  function getCSS(name) {
+    if (!cssCache[name])
+      cssCache[name] = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return cssCache[name];
+  }
+
+  // ---- Main loop ----
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05; // clamp big tab-switch gaps
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // ---- Mode buttons ----
+  const modeAIBtn = document.getElementById("modeAI");
+  const mode2PBtn = document.getElementById("mode2P");
+  const redControls = document.getElementById("redControls");
+  function setMode(m) {
+    mode = m;
+    modeAIBtn.classList.toggle("active", m === "ai");
+    mode2PBtn.classList.toggle("active", m === "2p");
+    redControls.style.opacity = m === "2p" ? "1" : "0.35";
+    score1 = 0; score2 = 0;
+    s1El.textContent = 0; s2El.textContent = 0;
+    startRound();
+  }
+  modeAIBtn.addEventListener("click", () => setMode("ai"));
+  mode2PBtn.addEventListener("click", () => setMode("2p"));
+
+  // ---- Boot ----
+  setMode("ai");
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
