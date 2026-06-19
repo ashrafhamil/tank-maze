@@ -141,32 +141,32 @@
     gap: 16px;
     touch-action: none;
   }
-  #dpad {
-    display: grid;
-    grid-template-columns: repeat(3, 56px);
-    grid-template-rows: repeat(2, 56px);
-    gap: 6px;
-  }
-  #dpad .tbtn { grid-column: auto; }
-  #bUp { grid-column: 2; grid-row: 1; }
-  #bLeft { grid-column: 1; grid-row: 2; }
-  #bDown { grid-column: 2; grid-row: 2; }
-  #bRight { grid-column: 3; grid-row: 2; }
-  .tbtn {
-    -webkit-tap-highlight-color: transparent;
+  #stick {
+    position: relative;
+    width: 132px;
+    height: 132px;
+    border-radius: 50%;
+    background: radial-gradient(circle at center, #313d26 0%, #232c1b 70%);
+    border: 2px solid #4f6238;
     touch-action: none;
+    -webkit-tap-highlight-color: transparent;
     user-select: none;
-    background: #2c3622;
-    border: 1px solid #4f6238;
-    border-radius: 10px;
-    color: var(--ink);
-    font-size: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
+    flex: none;
   }
-  .tbtn:active { background: #4f6238; }
+  #knob {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 58px;
+    height: 58px;
+    margin: -29px 0 0 -29px;
+    border-radius: 50%;
+    background: #5c7340;
+    border: 2px solid #7da155;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.4);
+    pointer-events: none;
+    transition: transform 0.05s linear;
+  }
   #fireBtn {
     width: 92px;
     height: 92px;
@@ -225,12 +225,7 @@
   </div>
 
   <div id="touchControls">
-    <div id="dpad">
-      <button class="tbtn" id="bUp" data-k="w" aria-label="forward">▲</button>
-      <button class="tbtn" id="bLeft" data-k="a" aria-label="turn left">◀</button>
-      <button class="tbtn" id="bDown" data-k="s" aria-label="reverse">▼</button>
-      <button class="tbtn" id="bRight" data-k="d" aria-label="turn right">▶</button>
-    </div>
+    <div id="stick" aria-label="move"><div id="knob"></div></div>
     <button id="fireBtn" aria-label="fire">FIRE</button>
   </div>
 
@@ -685,6 +680,8 @@
     last = now;
     if (dt > 0.05) dt = 0.05; // clamp big tab-switch gaps
 
+    updateJoystick();         // touch stick -> key state for the controlled tank
+
     // backstop for PeerJS's unreliable close event: no packets => disconnected
     if ((mode === "host" || mode === "guest") && conn && now - lastPeerMsg > STALE_MS)
       handleDisconnect();
@@ -966,8 +963,56 @@
     el.addEventListener("pointercancel", up);
     el.addEventListener("contextmenu", (e) => e.preventDefault());
   }
-  document.querySelectorAll("#dpad .tbtn").forEach((b) => bindHold(b, b.dataset.k));
   bindHold(document.getElementById("fireBtn"), " ");
+
+  // ---- Analog thumb-stick: push toward where the tank should go ----
+  // The stick direction is a desired heading; updateJoystick() turns the tank
+  // toward it and drives forward, expressed through the same w/a/s/d key state.
+  const stick = document.getElementById("stick");
+  const knob = document.getElementById("knob");
+  const JS_DEAD = 0.22;            // ignore tiny nudges near centre
+  let jsEngaged = false, jsId = null, jsDX = 0, jsDY = 0, jsMag = 0;
+
+  function stickSet(clientX, clientY) {
+    const r = stick.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const dx = clientX - cx, dy = clientY - cy;
+    const max = r.width / 2;
+    const len = Math.hypot(dx, dy);
+    jsDX = dx; jsDY = dy; jsMag = len / max;
+    const clamped = Math.min(len, max);
+    const ux = len > 0 ? dx / len : 0, uy = len > 0 ? dy / len : 0;
+    knob.style.transform = "translate(" + ux * clamped + "px," + uy * clamped + "px)";
+  }
+  function stickClear() {
+    jsEngaged = false; jsId = null; jsMag = 0;
+    knob.style.transform = "translate(0,0)";
+    keys["w"] = keys["a"] = keys["s"] = keys["d"] = false;
+  }
+  stick.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    jsEngaged = true; jsId = e.pointerId;
+    try { stick.setPointerCapture(e.pointerId); } catch (_) {}
+    stickSet(e.clientX, e.clientY);
+  });
+  stick.addEventListener("pointermove", (e) => {
+    if (jsEngaged && e.pointerId === jsId) { e.preventDefault(); stickSet(e.clientX, e.clientY); }
+  });
+  stick.addEventListener("pointerup", (e) => { if (e.pointerId === jsId) stickClear(); });
+  stick.addEventListener("pointercancel", (e) => { if (e.pointerId === jsId) stickClear(); });
+
+  // Translate stick -> turn + drive for the tank this device controls.
+  function updateJoystick() {
+    if (!jsEngaged) return;                       // idle => leave keys to the keyboard
+    if (jsMag < JS_DEAD) { keys["w"] = keys["a"] = keys["s"] = keys["d"] = false; return; }
+    const myTank = mode === "guest" ? red : blue; // guest drives Red, everyone else Blue
+    const desired = Math.atan2(jsDY, jsDX);
+    const d = angleDiff(myTank.angle, desired);
+    keys["a"] = d < -0.12;                         // turn toward the heading
+    keys["d"] = d > 0.12;
+    keys["w"] = true;                              // drive forward while pushed
+    keys["s"] = false;
+  }
 
   // ---- Boot ----
   // A "?room=CODE" link (shared by a host) drops the friend straight into joining.
