@@ -779,6 +779,7 @@
   }
 
   function teardownNet() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (conn) { try { conn.close(); } catch (e) {} conn = null; }
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     role = null;
@@ -811,6 +812,21 @@
     return cachedIce;
   }
 
+  // Keep the room alive across signaling-broker blips (wifi hiccup, brief sleep).
+  // The P2P data channel is independent, so this only matters while waiting /
+  // before the two peers have connected.
+  let reconnectTimer = null;
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (peer && !peer.destroyed && peer.disconnected) {
+        try { peer.reconnect(); } catch (_) {}
+        scheduleReconnect();   // keep retrying until the broker is back
+      }
+    }, 2000);
+  }
+
   let hostRetries = 0;
   async function startHost() {
     if (!window.Peer) { setNetStatus("Online needs internet — PeerJS didn't load."); return; }
@@ -819,20 +835,34 @@
     setNetStatus("Starting…");
     const ice = await getIceServers();
     const code = makeCode();
+    let opened = false;
     peer = new Peer("tankmaze-" + code, { config: { iceServers: ice } });
     peer.on("open", () => {
       hostRetries = 0;
-      roomCode = code;
-      joinUrl = location.origin + location.pathname + "?room=" + code;
-      copyLinkBtn.style.display = "inline-block";
-      setNetStatus('Code <b>' + code + '</b> — or hit Copy Link. Waiting…');
-      bannerBig.textContent = "ROOM " + code;
-      bannerBig.style.color = "var(--p1)";
-      bannerSub.innerHTML =
-        'Send your friend the <b style="color:#ffe27a">Copy Link</b> button below' +
-        '<br/>(or the code <b style="color:#ffe27a;letter-spacing:3px">' + code + '</b>).' +
-        '<br/>Waiting for them to join…';
-      banner.classList.add("show");
+      if (!opened) {
+        opened = true;
+        roomCode = code;
+        joinUrl = location.origin + location.pathname + "?room=" + code;
+        copyLinkBtn.style.display = "inline-block";
+        setNetStatus('Code <b>' + code + '</b> — or hit Copy Link. Waiting…');
+        bannerBig.textContent = "ROOM " + code;
+        bannerBig.style.color = "var(--p1)";
+        bannerSub.innerHTML =
+          'Send your friend the <b style="color:#ffe27a">Copy Link</b> button below' +
+          '<br/>(or the code <b style="color:#ffe27a;letter-spacing:3px">' + code + '</b>).' +
+          '<br/>Waiting for them to join…';
+        banner.classList.add("show");
+      } else if (!conn) {
+        // reconnected to broker while still waiting — room is live again
+        setNetStatus('Reconnected. Code <b>' + code + '</b> — waiting…');
+      }
+    });
+    peer.on("disconnected", () => {
+      if (!peer || peer.destroyed) return;
+      if (conn && conn.open) return;            // already playing; data channel is independent
+      if (mode !== "lobby" && mode !== "host") return;
+      setNetStatus('<span style="color:#ffe27a">Connection dropped — reconnecting…</span>');
+      scheduleReconnect();
     });
     peer.on("connection", (c) => {
       role = "host";
@@ -849,6 +879,9 @@
         hostRetries++;                          // stale id on broker — fresh code
         setNetStatus("Code busy, retrying…");
         startHost();
+      } else if (type === "network" || type === "socket-error" || type === "server-error") {
+        setNetStatus('<span style="color:#ffe27a">Network hiccup — reconnecting…</span>');
+        scheduleReconnect();
       } else {
         setNetStatus('<span style="color:var(--p2)">Error: ' + type + '</span>');
       }
@@ -863,8 +896,9 @@
     mode = "lobby"; setActiveBtns(); setControlsLegend();
     setNetStatus("Connecting to " + code + "…");
     const ice = await getIceServers();
+    let gopened = false;
     peer = new Peer(undefined, { config: { iceServers: ice } });
-    peer.on("open", () => {
+    function connectToHost() {
       role = "guest";
       const c = peer.connect("tankmaze-" + code, { reliable: true });
       bindConn(c, () => {
@@ -872,10 +906,26 @@
         setNetStatus('Connected! You are <b style="color:var(--p2)">RED</b>.');
         banner.classList.remove("show");
       });
+    }
+    peer.on("open", () => {
+      if (!gopened) { gopened = true; connectToHost(); }
+      else if (!conn || !conn.open) connectToHost();   // reconnected before joining — retry
+    });
+    peer.on("disconnected", () => {
+      if (!peer || peer.destroyed) return;
+      if (conn && conn.open) return;            // joined; gameplay continues regardless
+      if (mode !== "lobby" && mode !== "guest") return;
+      setNetStatus('<span style="color:#ffe27a">Reconnecting…</span>');
+      scheduleReconnect();
     });
     peer.on("error", (e) => {
       let type = (e && e.type) || "network";
       if (type === "peer-unavailable") type = "no room with that code";
+      else if (type === "network" || type === "socket-error" || type === "server-error") {
+        setNetStatus('<span style="color:#ffe27a">Network hiccup — reconnecting…</span>');
+        scheduleReconnect();
+        return;
+      }
       setNetStatus('<span style="color:var(--p2)">' + type + '</span>');
     });
   }
