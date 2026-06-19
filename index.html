@@ -268,10 +268,10 @@
   const TANK_R = TILE * 0.34;
   const TANK_SPEED = 95;          // px/sec
   const TANK_TURN = 3.0;          // rad/sec
-  const RELOAD = 0.65;            // sec between shots
+  const RELOAD = 0.22;            // sec between shots (rapid fire — hold Space)
   const BULLET_SPEED = 230;       // px/sec
   const BULLET_R = 3.5;
-  const BULLET_LIFE = 4.0;        // sec
+  const BULLET_LIFE = 2.5;        // sec (shorter so rapid fire doesn't flood the maze)
   const MAX_BOUNCE = 2;
 
   class Tank {
