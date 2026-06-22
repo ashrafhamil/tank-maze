@@ -188,10 +188,43 @@
   }
   #fireBtn:active { background: var(--p2); color: #11150f; }
 
+  /* D-pad (alternate control scheme) */
+  #dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 56px);
+    grid-template-rows: repeat(2, 56px);
+    gap: 6px;
+  }
+  #bUp { grid-column: 2; grid-row: 1; }
+  #bLeft { grid-column: 1; grid-row: 2; }
+  #bDown { grid-column: 2; grid-row: 2; }
+  #bRight { grid-column: 3; grid-row: 2; }
+  .tbtn {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+    user-select: none;
+    background: #2c3622;
+    border: 1px solid #4f6238;
+    border-radius: 10px;
+    color: var(--ink);
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .tbtn:active { background: #4f6238; }
+  /* show one scheme at a time */
+  #touchControls.scheme-stick #dpad { display: none; }
+  #touchControls.scheme-dpad #stick { display: none; }
+  #ctrlToggleRow { display: none; }
+  #ctrlToggle { font-size: 11px; padding: 5px 12px; opacity: 0.85; }
+
   @media (pointer: coarse) {
     body { gap: 8px; padding: 6px 0; justify-content: flex-start; }
     h1 { font-size: 15px; margin-top: 4px; }
     #touchControls { display: flex; }
+    #ctrlToggleRow { display: flex; justify-content: center; }
     #controls { display: none; }   /* keyboard legend irrelevant on phones */
     #mode2P { display: none; }     /* local 2P needs 2 keyboards — not playable on one phone */
     button { padding: 8px 12px; }  /* bigger tap targets for mode/online */
@@ -234,8 +267,17 @@
     <div id="redControls"><b>Red</b> &nbsp; <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> move &middot; <kbd>Enter</kbd> fire</div>
   </div>
 
-  <div id="touchControls">
-    <div id="stick" aria-label="move"><div id="knob"></div></div>
+  <div id="ctrlToggleRow"><button id="ctrlToggle" type="button">Controls: Joystick</button></div>
+  <div id="touchControls" class="scheme-stick">
+    <div id="moveArea">
+      <div id="stick" aria-label="move"><div id="knob"></div></div>
+      <div id="dpad">
+        <button class="tbtn" id="bUp" data-k="w" aria-label="forward">▲</button>
+        <button class="tbtn" id="bLeft" data-k="a" aria-label="turn left">◀</button>
+        <button class="tbtn" id="bDown" data-k="s" aria-label="reverse">▼</button>
+        <button class="tbtn" id="bRight" data-k="d" aria-label="turn right">▶</button>
+      </div>
+    </div>
     <button id="fireBtn" aria-label="fire">FIRE</button>
   </div>
 
@@ -1083,6 +1125,7 @@
   const knob = document.getElementById("knob");
   const JS_DEAD = 0.22;            // ignore tiny nudges near centre
   let jsEngaged = false, jsId = null, jsDX = 0, jsDY = 0, jsMag = 0;
+  let ctrlScheme = "stick";        // "stick" | "dpad" (mobile control scheme)
 
   function stickSet(clientX, clientY) {
     const r = stick.getBoundingClientRect();
@@ -1114,6 +1157,7 @@
 
   // Translate stick -> turn + drive for the tank this device controls.
   function updateJoystick() {
+    if (ctrlScheme !== "stick") return;           // D-pad mode drives keys directly
     if (!jsEngaged) return;                       // idle => leave keys to the keyboard
     if (jsMag < JS_DEAD) { keys["w"] = keys["a"] = keys["s"] = keys["d"] = false; return; }
     const myTank = mode === "guest" ? red : blue; // guest drives Red, everyone else Blue
@@ -1132,6 +1176,27 @@
       keys["d"] = revDiff > 0.12;
     }
   }
+
+  // ---- Control scheme toggle (mobile): joystick <-> D-pad ----
+  const touchControls = document.getElementById("touchControls");
+  const ctrlToggle = document.getElementById("ctrlToggle");
+  document.querySelectorAll("#dpad .tbtn").forEach((b) => bindHold(b, b.dataset.k));
+  function applyScheme(s) {
+    ctrlScheme = s === "dpad" ? "dpad" : "stick";
+    touchControls.classList.toggle("scheme-stick", ctrlScheme === "stick");
+    touchControls.classList.toggle("scheme-dpad", ctrlScheme === "dpad");
+    ctrlToggle.textContent = "Controls: " + (ctrlScheme === "stick" ? "Joystick" : "D-pad");
+    stickClear();                                  // release any held joystick movement
+    keys["w"] = keys["a"] = keys["s"] = keys["d"] = false;
+    try { localStorage.setItem("tm_ctrl", ctrlScheme); } catch (_) {}
+  }
+  ctrlToggle.addEventListener("click", () => {
+    applyScheme(ctrlScheme === "stick" ? "dpad" : "stick");
+    ctrlToggle.blur();
+  });
+  let savedScheme = "stick";
+  try { savedScheme = localStorage.getItem("tm_ctrl") || "stick"; } catch (_) {}
+  applyScheme(savedScheme);
 
   // ---- Live stats badge: visitors + online now (polls /api/presence) ----
   const statsEl = document.getElementById("stats");
