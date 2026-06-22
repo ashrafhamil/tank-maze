@@ -108,13 +108,27 @@
   }
   #onlinePanel {
     display: none;
+    flex-direction: column;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     font-size: 12px;
     letter-spacing: 0.5px;
+    max-width: 600px;
+  }
+  .olRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     flex-wrap: wrap;
     justify-content: center;
-    max-width: 600px;
+  }
+  .olLabel {
+    opacity: 0.45;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    min-width: 38px;
+    text-align: right;
   }
   #joinCode {
     background: #222a1a;
@@ -269,12 +283,17 @@
 
   <div id="onlinePanel">
     <input id="nameInput" type="text" maxlength="12" placeholder="Your name" autocomplete="off" />
-    <button id="submodeToggle" type="button">Mode: Last Standing</button>
-    <button id="hostBtn">Host Game</button>
-    <span style="opacity:0.6">or join:</span>
-    <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
-    <button id="joinBtn">Join</button>
-    <button id="copyLinkBtn" style="display:none">Copy Link</button>
+    <div class="olRow">
+      <span class="olLabel">Host</span>
+      <button id="submodeToggle" type="button">Mode: Last Standing</button>
+      <button id="hostBtn">Host Game</button>
+      <button id="copyLinkBtn" style="display:none">Copy Link</button>
+    </div>
+    <div class="olRow">
+      <span class="olLabel">Join</span>
+      <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
+      <button id="joinBtn">Join</button>
+    </div>
     <span id="netStatus"></span>
   </div>
 
@@ -1239,7 +1258,7 @@
       resetScores();
       bannerBig.textContent = "ONLINE";
       bannerBig.style.color = "var(--ink)";
-      bannerSub.innerHTML = "Host a game and share the code, or enter a friend's code to join.";
+      bannerSub.innerHTML = "Set your name, then host or join below.";
       banner.classList.add("show");
     } else {
       setupPlayers(m);                      // ai / 2p roster
