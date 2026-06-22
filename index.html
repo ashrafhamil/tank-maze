@@ -486,6 +486,21 @@
     { name: "Cyan",   css: "#3fe0d0" },
   ];
 
+  // ---- Powerup runes ----
+  const POWERUPS = [
+    { key: "speed",  css: "#ffd23f", glyph: "»" },   // move faster
+    { key: "rapid",  css: "#ff6b4f", glyph: "∞" },   // near-zero reload
+    { key: "bounce", css: "#3fe0d0", glyph: "⟳" },   // bullets bounce more
+  ];
+  const POW_KEYS = POWERUPS.map((p) => p.key);
+  const POW_DURATION = 8;        // sec a buff lasts after pickup
+  const POW_SPAWN_EVERY = 6;     // sec between rune spawns
+  const POW_MAX_FIELD = 3;       // max runes on the maze at once
+  const SPEED_MULT = 1.7;        // speed buff multiplier
+  const RAPID_RELOAD = 0.10;     // reload while rapid-fire buff active
+  const BOUNCE_MAX = 10;         // bounces while bounce buff active
+  const RUNE_R = TILE * 0.30;
+
   class Tank {
     constructor(index) {
       this.index = index;
@@ -498,6 +513,8 @@
       this.score = 0; this.respawnIn = 0;
       this.input = { fwd: false, back: false, left: false, right: false, fire: false };
       this.aiTurnGoal = 0; this.aiRepathIn = 0;
+      this.buffs = { speed: 0, rapid: 0, bounce: 0 };  // remaining seconds each
+      this.bf = 0;                  // buff bitmask (for render; synced to guests)
     }
     reset(cell) {
       const center = cellCenter(cell);
@@ -510,6 +527,8 @@
       this.input.fwd = this.input.back = this.input.left = this.input.right = this.input.fire = false;
       this.aiTurnGoal = this.angle;
       this.aiRepathIn = 0;
+      this.buffs.speed = this.buffs.rapid = this.buffs.bounce = 0;
+      this.bf = 0;
     }
     tryMove(dist) {
       const nx = this.x + Math.cos(this.angle) * dist;
@@ -521,10 +540,12 @@
     canFire() { return this.cooldown <= 0; }
     fire(bullets) {
       if (!this.canFire()) return;
-      this.cooldown = RELOAD;
+      this.cooldown = this.buffs.rapid > 0 ? RAPID_RELOAD : RELOAD;
       const mx = this.x + Math.cos(this.angle) * (TANK_R + BULLET_R + 1);
       const my = this.y + Math.sin(this.angle) * (TANK_R + BULLET_R + 1);
-      bullets.push(new Bullet(mx, my, this.angle, this));
+      const b = new Bullet(mx, my, this.angle, this);
+      b.maxBounce = this.buffs.bounce > 0 ? BOUNCE_MAX : MAX_BOUNCE;
+      bullets.push(b);
     }
   }
 
@@ -536,6 +557,7 @@
       this.owner = owner;
       this.life = BULLET_LIFE;
       this.bounces = 0;
+      this.maxBounce = MAX_BOUNCE;   // raised per-bullet when fired with the bounce buff
       this.dead = false;
       this.armTime = 0.06; // brief self-immunity so muzzle doesn't self-kill
     }
@@ -549,7 +571,7 @@
       if (circleHitsWall(nx, this.y, BULLET_R)) {
         this.vx = -this.vx;
         nx = this.x + this.vx * dt;
-        if (++this.bounces > MAX_BOUNCE) { this.dead = true; return; }
+        if (++this.bounces > this.maxBounce) { this.dead = true; return; }
       }
       this.x = nx;
 
@@ -558,7 +580,7 @@
       if (circleHitsWall(this.x, ny, BULLET_R)) {
         this.vy = -this.vy;
         ny = this.y + this.vy * dt;
-        if (++this.bounces > MAX_BOUNCE) { this.dead = true; return; }
+        if (++this.bounces > this.maxBounce) { this.dead = true; return; }
       }
       this.y = ny;
     }
@@ -570,6 +592,8 @@
   let players = [];             // all tanks in play (array index === color slot)
   let myId = 0;                 // index of the locally-controlled player
   let bullets = [];
+  let powerups = [];            // runes on the maze: {type, c, r, x, y}
+  let pwTimer = POW_SPAWN_EVERY;
   let roundOver = false;
   let lastWinner = null;        // winner player index | "draw" | null (synced to guest)
   let endTimer = 0;
@@ -625,6 +649,8 @@
     const cells = spawnCells(Math.max(1, players.length));
     players.forEach((p, i) => p && p.reset(cells[i]));
     bullets = [];
+    powerups = [];
+    pwTimer = POW_SPAWN_EVERY;
     roundOver = false;
     matchOver = false;
     lastWinner = null;
@@ -772,10 +798,11 @@
   // players and for the remote (guest) player on the host's simulation.
   function driveTank(tank, dt, inp) {
     if (!tank.alive) return;
+    const spd = TANK_SPEED * (tank.buffs.speed > 0 ? SPEED_MULT : 1);
     if (inp.left) tank.angle -= TANK_TURN * dt;
     if (inp.right) tank.angle += TANK_TURN * dt;
-    if (inp.fwd) tank.tryMove(TANK_SPEED * dt);
-    if (inp.back) tank.tryMove(-TANK_SPEED * dt * 0.6);
+    if (inp.fwd) tank.tryMove(spd * dt);
+    if (inp.back) tank.tryMove(-spd * dt * 0.6);
     if (inp.fire) tank.fire(bullets);
   }
 
@@ -809,6 +836,7 @@
       }
     }
     bullets = bullets.filter((b) => !b.dead);
+    updatePowerups(dt);
 
     const present = players.filter(Boolean);
     if (submode === "respawn") {
@@ -856,6 +884,50 @@
     p.reset(cell);
   }
 
+  // ---- Powerup runes (host / local sim only; guests just render synced state) ----
+  function updatePowerups(dt) {
+    // tick buff timers + recompute each tank's buff bitmask
+    for (const p of players) {
+      if (!p) continue;
+      let m = 0;
+      for (let k = 0; k < POW_KEYS.length; k++) {
+        const key = POW_KEYS[k];
+        if (p.buffs[key] > 0) {
+          p.buffs[key] = Math.max(0, p.buffs[key] - dt);
+          if (p.buffs[key] > 0) m |= (1 << k);
+        }
+      }
+      p.bf = m;
+    }
+    // spawn on a timer, up to the field cap
+    pwTimer -= dt;
+    if (pwTimer <= 0) { pwTimer = POW_SPAWN_EVERY; trySpawnPowerup(); }
+    // pickups
+    for (let i = powerups.length - 1; i >= 0; i--) {
+      const r = powerups[i];
+      for (const p of players) {
+        if (!p || !p.alive) continue;
+        const dx = p.x - r.x, dy = p.y - r.y;
+        if (dx * dx + dy * dy < (TANK_R + RUNE_R) ** 2) {
+          p.buffs[POW_KEYS[r.type]] = POW_DURATION;
+          powerups.splice(i, 1);
+          break;
+        }
+      }
+    }
+  }
+  function trySpawnPowerup() {
+    if (powerups.length >= POW_MAX_FIELD || !floorCells.length) return;
+    for (let tries = 0; tries < 20; tries++) {
+      const cell = randFloor();
+      const x = cell.c * TILE + TILE / 2, y = cell.r * TILE + TILE / 2;
+      let ok = true;
+      for (const p of players) if (p && p.alive && (p.x - x) ** 2 + (p.y - y) ** 2 < (TILE * 1.2) ** 2) { ok = false; break; }
+      if (ok) for (const r of powerups) if ((r.x - x) ** 2 + (r.y - y) ** 2 < (TILE * 1.2) ** 2) { ok = false; break; }
+      if (ok) { powerups.push({ type: (Math.random() * POWERUPS.length) | 0, c: cell.c, r: cell.r, x, y }); return; }
+    }
+  }
+
   // ---- Render ----
   function drawMaze() {
     ctx.fillStyle = getCSS("--floor");
@@ -878,6 +950,19 @@
   function drawTank(t) {
     if (!t.alive) return;
     const main = t.css;
+    // buff aura: one ring per active buff, in that buff's colour
+    if (t.bf) {
+      for (let k = 0; k < POWERUPS.length; k++) {
+        if (!(t.bf & (1 << k))) continue;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, TANK_R + 4 + k * 3, 0, Math.PI * 2);
+        ctx.strokeStyle = POWERUPS[k].css;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.85;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
     ctx.save();
     ctx.translate(t.x, t.y);
     ctx.rotate(t.angle);
@@ -910,8 +995,27 @@
     ctx.stroke();
   }
 
+  function drawPowerup(r) {
+    const def = POWERUPS[r.type];
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    // soft glow + rune body
+    ctx.globalAlpha = 0.18;
+    ctx.beginPath(); ctx.arc(0, 0, RUNE_R + 4, 0, Math.PI * 2); ctx.fillStyle = def.css; ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.arc(0, 0, RUNE_R, 0, Math.PI * 2);
+    ctx.fillStyle = "#11150f"; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = def.css; ctx.stroke();
+    ctx.fillStyle = def.css;
+    ctx.font = "bold " + Math.round(RUNE_R * 1.4) + "px monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(def.glyph, 0, 1);
+    ctx.restore();
+  }
+
   function render() {
     drawMaze();
+    for (const r of powerups) drawPowerup(r);
     bullets.forEach(drawBullet);
     for (const p of players) if (p) drawTank(p);
   }
@@ -970,9 +1074,10 @@
       t: "s",
       ps: players.filter(Boolean).map((p) => ({
         i: p.index, x: Math.round(p.x), y: Math.round(p.y),
-        a: +p.angle.toFixed(3), al: p.alive, sc: p.score, nm: p.label,
+        a: +p.angle.toFixed(3), al: p.alive, sc: p.score, nm: p.label, bf: p.bf,
       })),
       bl: bullets.map((b) => [Math.round(b.x), Math.round(b.y)]),
+      pw: powerups.map((r) => [r.type, Math.round(r.x), Math.round(r.y)]),
       ro: roundOver, w: lastWinner, md: submode, mo: matchOver, tg: matchTarget,
     });
   }
@@ -998,11 +1103,12 @@
       if (ps.i > maxI) maxI = ps.i;
       let p = players[ps.i];
       if (!p) p = players[ps.i] = mkTank(ps.i, "remote");
-      p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc; p.label = ps.nm || "";
+      p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc; p.label = ps.nm || ""; p.bf = ps.bf || 0;
     }
     for (let i = 0; i <= maxI; i++) if (!present.has(i)) players[i] = null;
     players.length = maxI + 1;
     bullets = (m.bl || []).map(([x, y]) => ({ x, y }));
+    powerups = (m.pw || []).map(([type, x, y]) => ({ type, x, y }));
     updateScoreboard();
     roundOver = m.ro;
     if (m.ro) showResult(m.w);
@@ -1506,9 +1612,12 @@
   // Read-only test hook (only when the URL contains "debug"); no effect otherwise.
   if (location.search.indexOf("debug") >= 0) {
     window.__tmState = () => players.filter(Boolean).map((p) => ({
-      i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score, rs: p.respawnIn,
+      i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score, rs: p.respawnIn, bf: p.bf,
     }));
     window.__tmMode = () => mode;
+    window.__tmPow = () => powerups.map((r) => ({ type: r.type, x: Math.round(r.x), y: Math.round(r.y) }));
+    // drop a rune onto a tank so the next sim tick picks it up (test helper)
+    window.__tmDropPow = (type, slot) => { const p = players[slot]; if (p) powerups.push({ type, c: 0, r: 0, x: p.x, y: p.y }); };
     window.__tmMaze = () => MAZE.join("\n");
     window.__tmSub = () => submode;
     window.__tmRoundOver = () => roundOver;
