@@ -4,8 +4,8 @@
 //     than TTL are pruned, so the live count = fresh heartbeats.
 //   - "visits": an all-time counter, incremented once per new browser (new=1).
 //
-// Required Vercel env vars (auto-added by the Vercel<->Upstash integration, or set
-// manually):  UPSTASH_REDIS_REST_URL,  UPSTASH_REDIS_REST_TOKEN
+// Env vars: KV_REST_API_URL + KV_REST_API_TOKEN (auto-added by the Vercel<->Upstash
+// "Upstash for Redis" integration); falls back to UPSTASH_REDIS_REST_URL/TOKEN.
 //
 // Returns { online, total }. If unconfigured/errored, returns nulls (200) so the
 // client just hides the badge — never breaks the page.
@@ -15,8 +15,9 @@ const TTL_MS = 45000; // a tab counts as online if it pinged within 45s
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  // Vercel<->Upstash integration injects KV_REST_API_*; fall back to UPSTASH_* names.
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) { res.status(200).json({ online: null, total: null }); return; }
 
   const id = (req.query.id || "anon").toString().slice(0, 64);
