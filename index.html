@@ -258,6 +258,7 @@
   </div>
 
   <div id="onlinePanel">
+    <button id="submodeToggle" type="button">Mode: Last Standing</button>
     <button id="hostBtn">Host Game</button>
     <span style="opacity:0.6">or join:</span>
     <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
@@ -519,6 +520,9 @@
   let roundOver = false;
   let lastWinner = null;        // winner player index | "draw" | null (synced to guest)
   let endTimer = 0;
+  let submode = "standing";     // "standing" (last alive wins) | "respawn" (deathmatch)
+  let hostSubmode = "standing"; // host's pick before hosting
+  const RESPAWN_DELAY = 2.0;    // seconds dead before respawning (deathmatch)
 
   function mkTank(index, kind) { const t = new Tank(index); t.kind = kind; return t; }
   // Roster for a local mode. Online rosters are managed by the connection
@@ -720,18 +724,45 @@
     }
     bullets = bullets.filter((b) => !b.dead);
 
-    // round end depends on submode (set in Stage C); Stage B = last-standing
     const present = players.filter(Boolean);
-    const alive = present.filter((p) => p.alive);
-    if (present.length >= 2 && alive.length <= 1) {
-      endTimer += dt;
-      if (endTimer > 0.7) endRound(alive[0] || null);
+    if (submode === "respawn") {
+      // deathmatch: dead tanks respawn after a delay; never ends on its own
+      for (const p of present) {
+        if (!p.alive) { p.respawnIn -= dt; if (p.respawnIn <= 0) respawnTank(p); }
+      }
+    } else {
+      // last-standing: round ends when <=1 tank remains
+      const alive = present.filter((p) => p.alive);
+      if (present.length >= 2 && alive.length <= 1) {
+        endTimer += dt;
+        if (endTimer > 0.7) endRound(alive[0] || null);
+      }
     }
   }
 
-  // A bullet hit a tank. Kill credit handled here (used by respawn mode later).
+  // A bullet hit a tank.
   function onKill(bullet, victim) {
     victim.alive = false;
+    if (submode === "respawn") {
+      victim.respawnIn = RESPAWN_DELAY;
+      const killer = bullet.owner;
+      if (killer && killer !== victim) { killer.score++; updateScoreboard(); }  // frag
+    }
+  }
+
+  // Deathmatch respawn: a floor cell away from any living enemy.
+  function respawnTank(p) {
+    let cell = randFloor();
+    for (let i = 0; i < 20; i++) {
+      const cand = randFloor();
+      const cx = cand.c * TILE + TILE / 2, cy = cand.r * TILE + TILE / 2;
+      let ok = true;
+      for (const q of players) {
+        if (q && q !== p && q.alive && (q.x - cx) ** 2 + (q.y - cy) ** 2 < (TILE * 3) ** 2) { ok = false; break; }
+      }
+      if (ok) { cell = cand; break; }
+    }
+    p.reset(cell);
   }
 
   // ---- Render ----
@@ -851,7 +882,7 @@
         a: +p.angle.toFixed(3), al: p.alive, sc: p.score,
       })),
       bl: bullets.map((b) => [Math.round(b.x), Math.round(b.y)]),
-      ro: roundOver, w: lastWinner,
+      ro: roundOver, w: lastWinner, md: submode,
     });
   }
 
@@ -866,6 +897,7 @@
 
   // ---- Guest: apply host state (roster can be sparse — slots may be empty) ----
   function applyState(m) {
+    if (m.md) submode = m.md;
     const present = new Set();
     let maxI = -1;
     for (const ps of m.ps) {
@@ -940,7 +972,8 @@
   function hostStatus() {
     if (mode !== "host") return;
     const n = conns.length + 1;
-    setNetStatus('Hosting <b>' + roomCode + '</b> — ' + n + ' player' + (n === 1 ? "" : "s") +
+    const mn = submode === "respawn" ? "Deathmatch" : "Last Standing";
+    setNetStatus('Hosting <b>' + roomCode + '</b> · ' + mn + ' · ' + n + ' player' + (n === 1 ? "" : "s") +
       '. You are <b style="color:' + COLORS[0].css + '">Blue</b>.');
   }
 
@@ -1019,6 +1052,7 @@
   async function startHost() {
     if (!window.Peer) { setNetStatus("Online needs internet — PeerJS didn't load."); return; }
     teardownNet();
+    submode = hostSubmode;          // lock in the chosen match type
     mode = "lobby"; setActiveBtns(); setControlsLegend();
     setNetStatus("Starting…");
     const ice = await getIceServers();
@@ -1187,6 +1221,16 @@
   modeAIBtn.addEventListener("click", () => setMode("ai"));
   mode2PBtn.addEventListener("click", () => setMode("2p"));
   modeOnlineBtn.addEventListener("click", () => setMode("lobby"));
+  const submodeToggle = document.getElementById("submodeToggle");
+  function updateSubmodeLabel() {
+    submodeToggle.textContent = "Mode: " + (hostSubmode === "respawn" ? "Deathmatch" : "Last Standing");
+  }
+  submodeToggle.addEventListener("click", () => {
+    hostSubmode = hostSubmode === "standing" ? "respawn" : "standing";
+    updateSubmodeLabel();
+    submodeToggle.blur();
+  });
+  updateSubmodeLabel();
   hostBtn.addEventListener("click", () => { startHost(); hostBtn.blur(); });
   joinBtn.addEventListener("click", () => { startGuest(joinCode.value); joinBtn.blur(); });
   joinCode.addEventListener("keydown", (e) => {
@@ -1340,9 +1384,12 @@
   // Read-only test hook (only when the URL contains "debug"); no effect otherwise.
   if (location.search.indexOf("debug") >= 0) {
     window.__tmState = () => players.filter(Boolean).map((p) => ({
-      i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score,
+      i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score, rs: p.respawnIn,
     }));
     window.__tmMode = () => mode;
+    window.__tmSub = () => submode;
+    window.__tmRoundOver = () => roundOver;
+    window.__tmKill = (slot, bySlot) => { const v = players[slot]; if (v) onKill({ owner: players[bySlot] }, v); };
   }
 
   // ---- Boot ----
