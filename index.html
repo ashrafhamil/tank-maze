@@ -345,8 +345,7 @@
   const banner = document.getElementById("banner");
   const bannerBig = document.getElementById("bannerBig");
   const bannerSub = document.getElementById("bannerSub");
-  const s1El = document.getElementById("s1");
-  const s2El = document.getElementById("s2");
+  const scoreboardEl = document.getElementById("scoreboard");
 
   // ---- Wall helpers ----
   function isWallCell(c, r) {
@@ -533,6 +532,7 @@
 
   // ---- Net state ----
   let peer = null, conn = null, role = null;   // role: "host" | "guest"
+  let conns = [];                              // host: [{conn, slot, lastMsg}]
   let guestSuppressFire = false;               // guest: swallow the round-start Space
   let lastPeerMsg = 0;                          // perf-time of last packet from the other side
   const STALE_MS = 10000;                       // no packets this long => treat as disconnected
@@ -563,14 +563,14 @@
     recomputeFloors();
     if (role === "host") broadcast({ t: "m", m: MAZE });  // stream the maze to guests
     const cells = spawnCells(Math.max(1, players.length));
-    players.forEach((p, i) => p.reset(cells[i]));
+    players.forEach((p, i) => p && p.reset(cells[i]));
     bullets = [];
     roundOver = false;
     lastWinner = null;
     endTimer = 0;
     keys[" "] = false;       // consume the Space/Enter that started the round
     keys["enter"] = false;   // so the fresh tank doesn't fire on spawn
-    players.forEach((p) => (p.input.fire = false));  // no auto-fire on spawn
+    players.forEach((p) => p && (p.input.fire = false));  // no auto-fire on spawn
     banner.classList.remove("show");
   }
 
@@ -584,8 +584,12 @@
   }
 
   function updateScoreboard() {
-    s1El.textContent = players[0] ? players[0].score : 0;
-    s2El.textContent = players[1] ? players[1].score : 0;
+    const present = players.filter(Boolean);
+    scoreboardEl.innerHTML = present.map((p) =>
+      '<div class="score" style="color:' + p.css + '">' +
+      '<span class="dot" style="background:' + p.css + '"></span>' + p.score + ' ' + p.name +
+      '</div>'
+    ).join("");
   }
 
   // Banner text for a finished round (winner = player index | "draw").
@@ -628,7 +632,7 @@
   function nearestOpponent(self) {
     let best = null, bestD = Infinity;
     for (const p of players) {
-      if (p === self || !p.alive) continue;
+      if (!p || p === self || !p.alive) continue;
       const d = (p.x - self.x) ** 2 + (p.y - self.y) ** 2;
       if (d < bestD) { bestD = d; best = p; }
     }
@@ -696,8 +700,9 @@
   function update(dt) {
     if (roundOver) return;
 
-    for (const p of players) p.cooldown = Math.max(0, p.cooldown - dt);
+    for (const p of players) if (p) p.cooldown = Math.max(0, p.cooldown - dt);
     for (const p of players) {
+      if (!p) continue;
       if (p.kind === "ai") { updateAI(p, dt); continue; }
       let inp;
       if (p.kind === "local") inp = readInput("w", "s", "a", "d", FIRE1);
@@ -710,17 +715,23 @@
       b.step(dt);
       if (b.dead) continue;
       for (const p of players) {
-        if (tankHit(b, p)) { p.alive = false; b.dead = true; break; }
+        if (p && tankHit(b, p)) { onKill(b, p); b.dead = true; break; }
       }
     }
     bullets = bullets.filter((b) => !b.dead);
 
-    // last-standing: round ends when <=1 tank remains
-    const alive = players.filter((p) => p.alive);
-    if (players.length >= 2 && alive.length <= 1) {
+    // round end depends on submode (set in Stage C); Stage B = last-standing
+    const present = players.filter(Boolean);
+    const alive = present.filter((p) => p.alive);
+    if (present.length >= 2 && alive.length <= 1) {
       endTimer += dt;
       if (endTimer > 0.7) endRound(alive[0] || null);
     }
+  }
+
+  // A bullet hit a tank. Kill credit handled here (used by respawn mode later).
+  function onKill(bullet, victim) {
+    victim.alive = false;
   }
 
   // ---- Render ----
@@ -780,7 +791,7 @@
   function render() {
     drawMaze();
     bullets.forEach(drawBullet);
-    for (const p of players) drawTank(p);
+    for (const p of players) if (p) drawTank(p);
   }
 
   // CSS var reader (cached)
@@ -801,19 +812,17 @@
 
     updateJoystick();         // touch stick -> key state for the controlled tank
 
-    // backstop for PeerJS's unreliable close event: no packets => disconnected
-    if ((mode === "host" || mode === "guest") && conn && now - lastPeerMsg > STALE_MS)
-      handleDisconnect();
-
     if (mode === "host") {
+      // backstop for PeerJS's unreliable close: prune guests that went silent
+      for (const e of conns.slice()) if (now - e.lastMsg > STALE_MS) removeGuest(e.slot);
       update(dt);
-      // stream state ~40Hz (cheaper than 60, still smooth)
-      netAccum += dt;
+      netAccum += dt;       // stream state ~40Hz
       if (netAccum >= 0.025) { netAccum = 0; sendState(); }
     } else if (mode === "guest") {
-      sendInput();        // guest only sends input; render uses last packet
+      if (conn && now - lastPeerMsg > STALE_MS) handleDisconnect();
+      sendInput();          // guest only sends input; render uses last packet
     } else if (mode !== "lobby") {
-      update(dt);         // ai / 2p
+      update(dt);           // ai / 2p
     }
     // lobby: no simulation, just render the frozen board
 
@@ -824,16 +833,20 @@
   // ---- Networking (host-authoritative WebRTC via PeerJS) ----
   // Host runs the whole simulation and owns Blue; the guest owns Red, sends its
   // key presses, and just renders whatever state the host streams back.
+  // guest -> host (single connection)
   function netSend(obj) {
     if (conn && conn.open) { try { conn.send(obj); } catch (e) {} }
   }
-  function broadcast(obj) { netSend(obj); }    // Stage A: single guest
+  // host -> all guests
+  function broadcast(obj) {
+    for (const e of conns) if (e.conn.open) { try { e.conn.send(obj); } catch (_) {} }
+  }
 
   function sendState() {
-    if (!conn || !conn.open) return;
-    netSend({
+    if (!conns.length) return;
+    broadcast({
       t: "s",
-      ps: players.map((p) => ({
+      ps: players.filter(Boolean).map((p) => ({
         i: p.index, x: Math.round(p.x), y: Math.round(p.y),
         a: +p.angle.toFixed(3), al: p.alive, sc: p.score,
       })),
@@ -851,13 +864,19 @@
     });
   }
 
+  // ---- Guest: apply host state (roster can be sparse — slots may be empty) ----
   function applyState(m) {
+    const present = new Set();
+    let maxI = -1;
     for (const ps of m.ps) {
+      present.add(ps.i);
+      if (ps.i > maxI) maxI = ps.i;
       let p = players[ps.i];
       if (!p) p = players[ps.i] = mkTank(ps.i, "remote");
       p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc;
     }
-    players.length = m.ps.length;              // trim any extra slots
+    for (let i = 0; i <= maxI; i++) if (!present.has(i)) players[i] = null;
+    players.length = maxI + 1;
     bullets = (m.bl || []).map(([x, y]) => ({ x, y }));
     updateScoreboard();
     roundOver = m.ro;
@@ -865,21 +884,64 @@
     else banner.classList.remove("show");
   }
 
+  // guest packets
   function onData(msg) {
     if (!msg || typeof msg !== "object") return;
-    lastPeerMsg = performance.now();           // any packet => peer still alive
-    if (role === "host") {
-      if (msg.t === "i") {
-        const p = players[1];                  // Stage A: the single guest is player 1
-        if (p) { p.input.fwd = !!msg.f; p.input.back = !!msg.b; p.input.left = !!msg.l; p.input.right = !!msg.r; p.input.fire = !!msg.x; }
-      } else if (msg.t === "start") {
-        if (roundOver) startRound();           // host owns the restart
-      }
-    } else if (role === "guest") {
-      if (msg.t === "you") myId = msg.i;        // which slot am I
-      else if (msg.t === "m") MAZE = msg.m;     // host's maze for this round
-      else if (msg.t === "s") applyState(msg);
+    lastPeerMsg = performance.now();
+    if (msg.t === "you") { myId = msg.i; setControlsLegend(); }
+    else if (msg.t === "m") MAZE = msg.m;
+    else if (msg.t === "s") applyState(msg);
+  }
+
+  // ---- Host: per-connection plumbing ----
+  function freeSlot() {
+    for (let i = 1; i < MAX_PLAYERS; i++) if (!players[i]) return i;  // slot 0 = host
+    return -1;
+  }
+  function onGuestOpen(c) {
+    const slot = freeSlot();
+    if (slot < 0) { try { c.close(); } catch (_) {} return; }   // room full
+    if (!players[0]) players[0] = mkTank(0, "local");
+    myId = 0;
+    players[slot] = mkTank(slot, "remote");
+    conns.push({ conn: c, slot, lastMsg: performance.now() });
+    try { c.send({ t: "you", i: slot }); } catch (_) {}
+    mode = "host"; setActiveBtns(); setControlsLegend();
+    updateScoreboard();
+    if (conns.length === 1) startRound();        // first guest -> fresh round for all
+    else players[slot].reset(randFloor());        // late joiner spawns straight in
+    hostStatus();
+  }
+  function onHostData(slot, msg) {
+    if (!msg || typeof msg !== "object") return;
+    const e = conns.find((x) => x.slot === slot);
+    if (e) e.lastMsg = performance.now();
+    if (msg.t === "i") {
+      const p = players[slot];
+      if (p) { p.input.fwd = !!msg.f; p.input.back = !!msg.b; p.input.left = !!msg.l; p.input.right = !!msg.r; p.input.fire = !!msg.x; }
+    } else if (msg.t === "start") {
+      if (roundOver) startRound();               // any player can trigger the next round
     }
+  }
+  function removeGuest(slot) {
+    conns = conns.filter((e) => e.slot !== slot);
+    players[slot] = null;
+    updateScoreboard();
+    if (conns.length === 0 && (mode === "host")) {
+      // everyone left — keep the room open and wait for new joiners
+      roundOver = true;
+      bannerBig.textContent = "WAITING";
+      bannerBig.style.color = "var(--ink)";
+      bannerSub.innerHTML = "All players left. Waiting for someone to join…";
+      banner.classList.add("show");
+    }
+    hostStatus();
+  }
+  function hostStatus() {
+    if (mode !== "host") return;
+    const n = conns.length + 1;
+    setNetStatus('Hosting <b>' + roomCode + '</b> — ' + n + ' player' + (n === 1 ? "" : "s") +
+      '. You are <b style="color:' + COLORS[0].css + '">Blue</b>.');
   }
 
   function bindConn(c, onOpen) {
@@ -904,6 +966,8 @@
 
   function teardownNet() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    for (const e of conns) { try { e.conn.close(); } catch (_) {} }
+    conns = [];
     if (conn) { try { conn.close(); } catch (e) {} conn = null; }
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     role = null;
@@ -983,22 +1047,17 @@
     });
     peer.on("disconnected", () => {
       if (!peer || peer.destroyed) return;
-      if (conn && conn.open) return;            // already playing; data channel is independent
+      if (conns.length) return;                 // guests connected; data channels are independent
       if (mode !== "lobby" && mode !== "host") return;
       setNetStatus('<span style="color:#ffe27a">Connection dropped — reconnecting…</span>');
       scheduleReconnect();
     });
     peer.on("connection", (c) => {
       role = "host";
-      bindConn(c, () => {
-        mode = "host"; setActiveBtns(); setControlsLegend();
-        players = [mkTank(0, "local"), mkTank(1, "remote")];
-        myId = 0;
-        updateScoreboard();
-        netSend({ t: "you", i: 1 });           // tell the guest its slot
-        setNetStatus('Connected! You are <b style="color:var(--p1)">BLUE</b>.');
-        startRound();
-      });
+      c.on("open", () => onGuestOpen(c));
+      c.on("data", (msg) => { const e = conns.find((x) => x.conn === c); if (e) onHostData(e.slot, msg); });
+      c.on("close", () => { const e = conns.find((x) => x.conn === c); if (e) removeGuest(e.slot); });
+      c.on("error", () => {});
     });
     peer.on("error", (e) => {
       const type = (e && e.type) || "network";
@@ -1030,7 +1089,7 @@
       const c = peer.connect("tankmaze-" + code, { reliable: true });
       bindConn(c, () => {
         mode = "guest"; setActiveBtns(); setControlsLegend();
-        setNetStatus('Connected! You are <b style="color:var(--p2)">RED</b>.');
+        setNetStatus("Connected! Joining the battle…");   // color shown in the legend
         banner.classList.remove("show");
       });
     }
@@ -1073,7 +1132,7 @@
   function setNetStatus(html) { netStatus.innerHTML = html; }
 
   function resetScores() {
-    players.forEach((p) => (p.score = 0));
+    players.forEach((p) => p && (p.score = 0));
     updateScoreboard();
     lastWinner = null;
   }
@@ -1088,12 +1147,13 @@
 
   function setControlsLegend() {
     if (mode === "host" || mode === "guest") {
-      const who = mode === "host" ? "BLUE" : "RED";
-      const col = mode === "host" ? "--p1" : "--p2";
+      const me = players[myId];
+      const nm = me ? me.name : "You";
+      const css = me ? me.css : "var(--ink)";
       controlsEl.innerHTML =
-        '<div>You are <b style="color:var(' + col + ')">' + who + '</b> &nbsp;' +
+        '<div>You are <b style="color:' + css + '">' + nm + '</b> &nbsp;' +
         '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &middot; <kbd>Space</kbd> fire' +
-        ' &middot; opponent is the other tank</div>';
+        ' &middot; free-for-all</div>';
     } else {
       controlsEl.innerHTML = controlsDefault;
       const rc = document.getElementById("redControls");
@@ -1276,6 +1336,14 @@
   }
   pingStats();
   setInterval(pingStats, 20000);
+
+  // Read-only test hook (only when the URL contains "debug"); no effect otherwise.
+  if (location.search.indexOf("debug") >= 0) {
+    window.__tmState = () => players.filter(Boolean).map((p) => ({
+      i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score,
+    }));
+    window.__tmMode = () => mode;
+  }
 
   // ---- Boot ----
   // A "?room=CODE" link (shared by a host) drops the friend straight into joining.
