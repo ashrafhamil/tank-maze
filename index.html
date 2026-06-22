@@ -512,7 +512,7 @@
       this.cooldown = 0; this.alive = false;
       this.score = 0; this.respawnIn = 0;
       this.input = { fwd: false, back: false, left: false, right: false, fire: false };
-      this.aiTurnGoal = 0; this.aiRepathIn = 0;
+      this.aiTurnGoal = 0; this.aiRepathIn = 0; this.aiNext = null; this.aiDodgeT = 0;
       this.buffs = { speed: 0, rapid: 0, bounce: 0 };  // remaining seconds each
       this.bf = 0;                  // buff bitmask (for render; synced to guests)
     }
@@ -526,7 +526,7 @@
       this.respawnIn = 0;
       this.input.fwd = this.input.back = this.input.left = this.input.right = this.input.fire = false;
       this.aiTurnGoal = this.angle;
-      this.aiRepathIn = 0;
+      this.aiRepathIn = 0; this.aiNext = null; this.aiDodgeT = 0;
       this.buffs.speed = this.buffs.rapid = this.buffs.bounce = 0;
       this.bf = 0;
     }
@@ -744,7 +744,7 @@
     return d;
   }
 
-  // ---- AI: target the nearest living opponent ----
+  // ---- AI helpers ----
   function nearestOpponent(self) {
     let best = null, bestD = Infinity;
     for (const p of players) {
@@ -754,36 +754,111 @@
     }
     return best;
   }
+  function nearestRune(self) {
+    let best = null, bestD = Infinity;
+    for (const r of powerups) {
+      const d = (r.x - self.x) ** 2 + (r.y - self.y) ** 2;
+      if (d < bestD) { bestD = d; best = r; }
+    }
+    return best ? { rune: best, dist: Math.sqrt(bestD) } : null;
+  }
+  // An enemy bullet within range and heading roughly at me?
+  function incomingBullet(self) {
+    for (const b of bullets) {
+      if (b.owner === self) continue;
+      const dx = self.x - b.x, dy = self.y - b.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > TILE * 3.2 || dist < 1) continue;
+      const bl = Math.hypot(b.vx, b.vy) || 1;
+      if ((b.vx * dx + b.vy * dy) / (bl * dist) > 0.6) return b;   // closing on me
+    }
+    return null;
+  }
+  function cellOf(x, y) { return { c: Math.floor(x / TILE), r: Math.floor(y / TILE) }; }
+  // BFS on floor cells: first step from `from` toward `to` (4-dir). null if blocked.
+  function bfsNext(from, to) {
+    if (from.c === to.c && from.r === to.r) return null;
+    const key = (c, r) => r * COLS + c;
+    const start = key(from.c, from.r), goal = key(to.c, to.r);
+    const prev = new Map([[start, -1]]);
+    const q = [start];
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (let h = 0; h < q.length; h++) {
+      const cur = q[h], cc = cur % COLS, cr = (cur - cc) / COLS;
+      if (cur === goal) break;
+      for (const [dc, dr] of dirs) {
+        const nc = cc + dc, nr = cr + dr;
+        if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || isWallCell(nc, nr)) continue;
+        const nk = key(nc, nr);
+        if (prev.has(nk)) continue;
+        prev.set(nk, cur);
+        q.push(nk);
+      }
+    }
+    if (!prev.has(goal)) return null;
+    let cur = goal, p = prev.get(goal);
+    while (p !== -1 && p !== start) { cur = p; p = prev.get(p); }   // walk back to first step
+    return { c: cur % COLS, r: (cur - (cur % COLS)) / COLS };
+  }
+
+  // ---- AI: hunt via pathfinding, grab runes, dodge bullets, aim & fire ----
   function updateAI(self, dt) {
     if (!self.alive) return;
     const target = nearestOpponent(self);
-    const los = target && hasLineOfSight(self.x, self.y, target.x, target.y);
+    if (!target) return;
+    const los = hasLineOfSight(self.x, self.y, target.x, target.y);
+    const targDist = Math.hypot(target.x - self.x, target.y - self.y);
 
-    let desired;
-    if (los) {
-      desired = Math.atan2(target.y - self.y, target.x - self.x);   // aim at target
+    self.aiDodgeT -= dt;
+    const threat = incomingBullet(self);
+    if (threat && self.aiDodgeT <= 0) {
+      const bAng = Math.atan2(threat.vy, threat.vx);
+      self.aiTurnGoal = bAng + Math.PI / 2 * (Math.random() < 0.5 ? 1 : -1);  // swerve aside
+      self.aiDodgeT = 0.4;
+    }
+
+    let desired, dodging = false;
+    if (self.aiDodgeT > 0) {
+      desired = self.aiTurnGoal; dodging = true;                   // commit the swerve briefly
+    } else if (los && targDist < TILE * 6) {
+      desired = Math.atan2(target.y - self.y, target.x - self.x);  // close + visible: aim
     } else {
-      self.aiRepathIn -= dt;                                        // wander
-      if (self.aiRepathIn <= 0) {
-        self.aiTurnGoal = self.angle + (Math.random() - 0.5) * Math.PI * 1.2;
-        self.aiRepathIn = 0.6 + Math.random() * 0.8;
+      // pick a goal — a nearby rune detour, else the enemy — and path to it
+      let gx = target.x, gy = target.y;
+      const rn = nearestRune(self);
+      if (rn && rn.dist < targDist * 0.9) { gx = rn.rune.x; gy = rn.rune.y; }
+      self.aiRepathIn -= dt;
+      if (self.aiRepathIn <= 0 || !self.aiNext) {
+        self.aiRepathIn = 0.25;
+        self.aiNext = bfsNext(cellOf(self.x, self.y), cellOf(gx, gy));
       }
-      desired = self.aiTurnGoal;
+      if (self.aiNext) {
+        const nx = self.aiNext.c * TILE + TILE / 2, ny = self.aiNext.r * TILE + TILE / 2;
+        if (Math.hypot(nx - self.x, ny - self.y) < TILE * 0.4) self.aiNext = null;  // reached step
+        desired = Math.atan2(ny - self.y, nx - self.x);
+      } else if (los) {
+        desired = Math.atan2(target.y - self.y, target.x - self.x);
+      } else {
+        self.aiTurnGoal = self.angle + (Math.random() - 0.5) * Math.PI;             // fallback wander
+        desired = self.aiTurnGoal;
+      }
     }
 
     const diff = angleDiff(self.angle, desired);
     const turn = TANK_TURN * dt;
     self.angle += Math.max(-turn, Math.min(turn, diff));
 
-    const before = { x: self.x, y: self.y };
-    self.tryMove(TANK_SPEED * dt);
-    const moved = Math.hypot(self.x - before.x, self.y - before.y);
-    if (moved < TANK_SPEED * dt * 0.3 && !los) {
-      self.aiTurnGoal = self.angle + (Math.random() < 0.5 ? 1 : -1) * (0.7 + Math.random());
-      self.aiRepathIn = 0.5;
+    // hold position to aim only when close, visible, and roughly lined up
+    const holdToAim = los && !dodging && targDist < TILE * 4 && Math.abs(diff) < 0.5;
+    if (!holdToAim) {
+      const before = { x: self.x, y: self.y };
+      self.tryMove(TANK_SPEED * (self.buffs.speed > 0 ? SPEED_MULT : 1) * dt);
+      if (Math.hypot(self.x - before.x, self.y - before.y) < TANK_SPEED * dt * 0.3) {
+        self.aiNext = null; self.aiRepathIn = 0;                   // stuck -> repath next frame
+      }
     }
 
-    if (los && Math.abs(diff) < 0.20 && self.canFire()) self.fire(bullets);
+    if (los && Math.abs(diff) < 0.22 && self.canFire()) self.fire(bullets);
   }
 
   // ---- Player control ----
@@ -1616,6 +1691,9 @@
     }));
     window.__tmMode = () => mode;
     window.__tmPow = () => powerups.map((r) => ({ type: r.type, x: Math.round(r.x), y: Math.round(r.y) }));
+    window.__tmBfs = (fc, fr, tc, tr) => bfsNext({ c: fc, r: fr }, { c: tc, r: tr });
+    window.__tmFloors = () => floorCells.map((c) => [c.c, c.r]);
+    window.__tmIsWall = (c, r) => isWallCell(c, r);
     // drop a rune onto a tank so the next sim tick picks it up (test helper)
     window.__tmDropPow = (type, slot) => { const p = players[slot]; if (p) powerups.push({ type, c: 0, r: 0, x: p.x, y: p.y }); };
     window.__tmMaze = () => MAZE.join("\n");
