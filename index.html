@@ -1434,7 +1434,7 @@
       statsFirstPing = false;
       if (d && d.online != null) {
         statsEl.style.display = "";
-        statsEl.textContent = "🟢 " + d.online + " online · " + (d.total || 0) + " visits";
+        statsEl.textContent = d.online + " online · " + (d.total || 0) + " visits";
       } else {
         statsEl.style.display = "none";   // backend not configured -> hide badge
       }
