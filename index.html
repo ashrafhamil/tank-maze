@@ -424,13 +424,27 @@
   const BULLET_R = 3.5;
   const BULLET_LIFE = 4.0;        // sec
   const MAX_BOUNCE = 5;          // bullet ricochets 5 times, dies on the 6th wall hit
+  const MAX_PLAYERS = 6;
+  const COLORS = [
+    { name: "Blue",   css: "#4fa3ff" },
+    { name: "Red",    css: "#ff6b4f" },
+    { name: "Green",  css: "#5fd35f" },
+    { name: "Yellow", css: "#ffd23f" },
+    { name: "Purple", css: "#c06bff" },
+    { name: "Cyan",   css: "#3fe0d0" },
+  ];
 
   class Tank {
-    constructor(color, isPlayer) {
-      this.color = color;
-      this.isPlayer = isPlayer;
+    constructor(index) {
+      this.index = index;
+      this.name = COLORS[index].name;
+      this.css = COLORS[index].css;
+      this.kind = "local";          // local | local2 | ai | remote
       this.x = 0; this.y = 0; this.angle = 0;
       this.cooldown = 0; this.alive = false;
+      this.score = 0; this.respawnIn = 0;
+      this.input = { fwd: false, back: false, left: false, right: false, fire: false };
+      this.aiTurnGoal = 0; this.aiRepathIn = 0;
     }
     reset(cell) {
       const center = cellCenter(cell);
@@ -439,7 +453,8 @@
       this.angle = Math.random() * Math.PI * 2;
       this.cooldown = 0;
       this.alive = true;
-      // AI memory
+      this.respawnIn = 0;
+      this.input.fwd = this.input.back = this.input.left = this.input.right = this.input.fire = false;
       this.aiTurnGoal = this.angle;
       this.aiRepathIn = 0;
     }
@@ -499,13 +514,22 @@
   // ---- Game state ----
   // modes: "ai" | "2p" | "lobby" (online, not connected) | "host" | "guest"
   let mode = "ai";
-  const blue = new Tank("blue", true);
-  const red = new Tank("red", false);
+  let players = [];             // all tanks in play (array index === color slot)
+  let myId = 0;                 // index of the locally-controlled player
   let bullets = [];
   let roundOver = false;
-  let lastWinner = null;        // "blue" | "red" | "draw" | null  (synced to guest)
-  let score1 = 0, score2 = 0;
+  let lastWinner = null;        // winner player index | "draw" | null (synced to guest)
   let endTimer = 0;
+
+  function mkTank(index, kind) { const t = new Tank(index); t.kind = kind; return t; }
+  // Roster for a local mode. Online rosters are managed by the connection
+  // handlers (host) / state packets (guest).
+  function setupPlayers(forMode) {
+    if (forMode === "ai") players = [mkTank(0, "local"), mkTank(1, "ai")];
+    else if (forMode === "2p") players = [mkTank(0, "local"), mkTank(1, "local2")];
+    else players = [];
+    myId = 0;
+  }
 
   // ---- Net state ----
   let peer = null, conn = null, role = null;   // role: "host" | "guest"
@@ -513,55 +537,69 @@
   let lastPeerMsg = 0;                          // perf-time of last packet from the other side
   const STALE_MS = 10000;                       // no packets this long => treat as disconnected
   let roomCode = "", joinUrl = "";              // current hosted room + its shareable link
-  // remote player's input, applied host-side to the red tank
-  const guestInput = { fwd: false, back: false, left: false, right: false, fire: false };
 
-  function farPair() {
-    // pick two floor cells with large separation
-    let best = null, bestD = -1;
-    for (let i = 0; i < 60; i++) {
-      const a = floorCells[(Math.random() * floorCells.length) | 0];
-      const b = floorCells[(Math.random() * floorCells.length) | 0];
-      const d = (a.c - b.c) ** 2 + (a.r - b.r) ** 2;
-      if (d > bestD) { bestD = d; best = [a, b]; }
+  function randFloor() { return floorCells[(Math.random() * floorCells.length) | 0]; }
+  // n spawn cells spread apart (greedy farthest-point sampling).
+  function spawnCells(n) {
+    const cells = [randFloor()];
+    while (cells.length < n) {
+      let best = null, bestD = -1;
+      for (let i = 0; i < 40; i++) {
+        const cand = randFloor();
+        let minD = Infinity;
+        for (const c of cells) {
+          const d = (cand.c - c.c) ** 2 + (cand.r - c.r) ** 2;
+          if (d < minD) minD = d;
+        }
+        if (minD > bestD) { bestD = minD; best = cand; }
+      }
+      cells.push(best);
     }
-    return best;
+    return cells;
   }
 
   function startRound() {
     MAZE = generateMaze();                      // fresh maze every round
     recomputeFloors();
-    if (role === "host") netSend({ t: "m", m: MAZE });  // host streams the maze to the guest
-    const [a, b] = farPair();
-    blue.reset(a);
-    red.reset(b);
+    if (role === "host") broadcast({ t: "m", m: MAZE });  // stream the maze to guests
+    const cells = spawnCells(Math.max(1, players.length));
+    players.forEach((p, i) => p.reset(cells[i]));
     bullets = [];
     roundOver = false;
     lastWinner = null;
     endTimer = 0;
     keys[" "] = false;       // consume the Space/Enter that started the round
     keys["enter"] = false;   // so the fresh tank doesn't fire on spawn
-    guestInput.fire = false; // same for the remote player's spawn press
+    players.forEach((p) => (p.input.fire = false));  // no auto-fire on spawn
     banner.classList.remove("show");
   }
 
-  function endRound(winner) {
+  function endRound(winner) {  // winner: player object | null (draw)
     if (roundOver) return;
     roundOver = true;
-    lastWinner = winner;
-    if (winner === "blue") score1++;
-    else if (winner === "red") score2++;
-    s1El.textContent = score1;
-    s2El.textContent = score2;
-    showResult(winner);
+    if (winner) winner.score++;
+    lastWinner = winner ? winner.index : "draw";
+    updateScoreboard();
+    showResult(lastWinner);
   }
 
-  // Banner text for a finished round (host shows it locally; guest shows it
-  // from the synced winner — neutral wording so it reads right on both ends).
-  function showResult(winner) {
-    if (winner === "blue") { bannerBig.textContent = "BLUE WINS"; bannerBig.style.color = "var(--p1)"; }
-    else if (winner === "red") { bannerBig.textContent = (mode === "ai" ? "YOU LOSE" : "RED WINS"); bannerBig.style.color = "var(--p2)"; }
-    else { bannerBig.textContent = "DRAW"; bannerBig.style.color = "var(--ink)"; }
+  function updateScoreboard() {
+    s1El.textContent = players[0] ? players[0].score : 0;
+    s2El.textContent = players[1] ? players[1].score : 0;
+  }
+
+  // Banner text for a finished round (winner = player index | "draw").
+  // Host shows it locally; guest shows it from the synced winner.
+  function showResult(w) {
+    if (w === "draw" || w == null) {
+      bannerBig.textContent = "DRAW";
+      bannerBig.style.color = "var(--ink)";
+    } else {
+      const p = players[w];
+      const lose = mode === "ai" && w !== 0;   // 1v1 vs computer; you are index 0
+      bannerBig.textContent = lose ? "YOU LOSE" : ((p ? p.name.toUpperCase() : "WINNER") + (lose ? "" : " WINS"));
+      bannerBig.style.color = p ? p.css : "var(--ink)";
+    }
     bannerSub.innerHTML = 'Press <kbd>Space</kbd> or <kbd>Enter</kbd> to play next round';
     banner.classList.add("show");
   }
@@ -586,44 +624,46 @@
     return d;
   }
 
-  // ---- AI for red tank ----
-  function updateAI(dt) {
-    if (!red.alive) return;
-    const dx = blue.x - red.x;
-    const dy = blue.y - red.y;
-    const targetAngle = Math.atan2(dy, dx);
-    const los = hasLineOfSight(red.x, red.y, blue.x, blue.y);
+  // ---- AI: target the nearest living opponent ----
+  function nearestOpponent(self) {
+    let best = null, bestD = Infinity;
+    for (const p of players) {
+      if (p === self || !p.alive) continue;
+      const d = (p.x - self.x) ** 2 + (p.y - self.y) ** 2;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+  }
+  function updateAI(self, dt) {
+    if (!self.alive) return;
+    const target = nearestOpponent(self);
+    const los = target && hasLineOfSight(self.x, self.y, target.x, target.y);
 
     let desired;
     if (los) {
-      // aim at player
-      desired = targetAngle;
+      desired = Math.atan2(target.y - self.y, target.x - self.x);   // aim at target
     } else {
-      // wander: pick a new heading periodically, prefer current direction
-      red.aiRepathIn -= dt;
-      if (red.aiRepathIn <= 0) {
-        red.aiTurnGoal = red.angle + (Math.random() - 0.5) * Math.PI * 1.2;
-        red.aiRepathIn = 0.6 + Math.random() * 0.8;
+      self.aiRepathIn -= dt;                                        // wander
+      if (self.aiRepathIn <= 0) {
+        self.aiTurnGoal = self.angle + (Math.random() - 0.5) * Math.PI * 1.2;
+        self.aiRepathIn = 0.6 + Math.random() * 0.8;
       }
-      desired = red.aiTurnGoal;
+      desired = self.aiTurnGoal;
     }
 
-    // rotate toward desired heading
-    const diff = angleDiff(red.angle, desired);
+    const diff = angleDiff(self.angle, desired);
     const turn = TANK_TURN * dt;
-    red.angle += Math.max(-turn, Math.min(turn, diff));
+    self.angle += Math.max(-turn, Math.min(turn, diff));
 
-    // move forward; if blocked, nudge a turn so it doesn't grind a wall
-    const before = { x: red.x, y: red.y };
-    red.tryMove(TANK_SPEED * dt);
-    const moved = Math.hypot(red.x - before.x, red.y - before.y);
+    const before = { x: self.x, y: self.y };
+    self.tryMove(TANK_SPEED * dt);
+    const moved = Math.hypot(self.x - before.x, self.y - before.y);
     if (moved < TANK_SPEED * dt * 0.3 && !los) {
-      red.aiTurnGoal = red.angle + (Math.random() < 0.5 ? 1 : -1) * (0.7 + Math.random());
-      red.aiRepathIn = 0.5;
+      self.aiTurnGoal = self.angle + (Math.random() < 0.5 ? 1 : -1) * (0.7 + Math.random());
+      self.aiRepathIn = 0.5;
     }
 
-    // fire if roughly aimed and can see player
-    if (los && Math.abs(diff) < 0.20 && red.canFire()) red.fire(bullets);
+    if (los && Math.abs(diff) < 0.20 && self.canFire()) self.fire(bullets);
   }
 
   // ---- Player control ----
@@ -656,34 +696,30 @@
   function update(dt) {
     if (roundOver) return;
 
-    blue.cooldown = Math.max(0, blue.cooldown - dt);
-    red.cooldown = Math.max(0, red.cooldown - dt);
-
-    // Blue is the local player in ai / 2p / host. (Guest never runs update.)
-    driveTank(blue, dt, readInput("w", "s", "a", "d", FIRE1));
-
-    if (mode === "2p")
-      driveTank(red, dt, readInput("arrowup", "arrowdown", "arrowleft", "arrowright", FIRE2));
-    else if (mode === "host")
-      driveTank(red, dt, guestInput);          // remote friend's tank
-    else
-      updateAI(dt);                            // mode === "ai"
+    for (const p of players) p.cooldown = Math.max(0, p.cooldown - dt);
+    for (const p of players) {
+      if (p.kind === "ai") { updateAI(p, dt); continue; }
+      let inp;
+      if (p.kind === "local") inp = readInput("w", "s", "a", "d", FIRE1);
+      else if (p.kind === "local2") inp = readInput("arrowup", "arrowdown", "arrowleft", "arrowright", FIRE2);
+      else inp = p.input;                      // remote: filled by net
+      driveTank(p, dt, inp);
+    }
 
     for (const b of bullets) {
       b.step(dt);
       if (b.dead) continue;
-      if (tankHit(b, blue)) { blue.alive = false; b.dead = true; }
-      if (tankHit(b, red)) { red.alive = false; b.dead = true; }
+      for (const p of players) {
+        if (tankHit(b, p)) { p.alive = false; b.dead = true; break; }
+      }
     }
     bullets = bullets.filter((b) => !b.dead);
 
-    if (!blue.alive || !red.alive) {
+    // last-standing: round ends when <=1 tank remains
+    const alive = players.filter((p) => p.alive);
+    if (players.length >= 2 && alive.length <= 1) {
       endTimer += dt;
-      if (endTimer > 0.7) {
-        if (!blue.alive && !red.alive) endRound("draw");
-        else if (!red.alive) endRound("blue");
-        else endRound("red");
-      }
+      if (endTimer > 0.7) endRound(alive[0] || null);
     }
   }
 
@@ -708,7 +744,7 @@
 
   function drawTank(t) {
     if (!t.alive) return;
-    const main = t.color === "blue" ? getCSS("--p1") : getCSS("--p2");
+    const main = t.css;
     ctx.save();
     ctx.translate(t.x, t.y);
     ctx.rotate(t.angle);
@@ -744,8 +780,7 @@
   function render() {
     drawMaze();
     bullets.forEach(drawBullet);
-    drawTank(blue);
-    drawTank(red);
+    for (const p of players) drawTank(p);
   }
 
   // CSS var reader (cached)
@@ -792,15 +827,18 @@
   function netSend(obj) {
     if (conn && conn.open) { try { conn.send(obj); } catch (e) {} }
   }
+  function broadcast(obj) { netSend(obj); }    // Stage A: single guest
 
   function sendState() {
     if (!conn || !conn.open) return;
     netSend({
       t: "s",
-      bx: Math.round(blue.x), by: Math.round(blue.y), ba: +blue.angle.toFixed(3), bA: blue.alive,
-      rx: Math.round(red.x), ry: Math.round(red.y), ra: +red.angle.toFixed(3), rA: red.alive,
+      ps: players.map((p) => ({
+        i: p.index, x: Math.round(p.x), y: Math.round(p.y),
+        a: +p.angle.toFixed(3), al: p.alive, sc: p.score,
+      })),
       bl: bullets.map((b) => [Math.round(b.x), Math.round(b.y)]),
-      s1: score1, s2: score2, ro: roundOver, w: lastWinner,
+      ro: roundOver, w: lastWinner,
     });
   }
 
@@ -814,11 +852,14 @@
   }
 
   function applyState(m) {
-    blue.x = m.bx; blue.y = m.by; blue.angle = m.ba; blue.alive = m.bA;
-    red.x = m.rx; red.y = m.ry; red.angle = m.ra; red.alive = m.rA;
+    for (const ps of m.ps) {
+      let p = players[ps.i];
+      if (!p) p = players[ps.i] = mkTank(ps.i, "remote");
+      p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc;
+    }
+    players.length = m.ps.length;              // trim any extra slots
     bullets = (m.bl || []).map(([x, y]) => ({ x, y }));
-    if (m.s1 !== score1) { score1 = m.s1; s1El.textContent = score1; }
-    if (m.s2 !== score2) { score2 = m.s2; s2El.textContent = score2; }
+    updateScoreboard();
     roundOver = m.ro;
     if (m.ro) showResult(m.w);
     else banner.classList.remove("show");
@@ -829,13 +870,14 @@
     lastPeerMsg = performance.now();           // any packet => peer still alive
     if (role === "host") {
       if (msg.t === "i") {
-        guestInput.fwd = !!msg.f; guestInput.back = !!msg.b;
-        guestInput.left = !!msg.l; guestInput.right = !!msg.r; guestInput.fire = !!msg.x;
+        const p = players[1];                  // Stage A: the single guest is player 1
+        if (p) { p.input.fwd = !!msg.f; p.input.back = !!msg.b; p.input.left = !!msg.l; p.input.right = !!msg.r; p.input.fire = !!msg.x; }
       } else if (msg.t === "start") {
-        if (roundOver) startRound();          // host owns the restart
+        if (roundOver) startRound();           // host owns the restart
       }
     } else if (role === "guest") {
-      if (msg.t === "m") MAZE = msg.m;          // host's maze for this round (guest renders only)
+      if (msg.t === "you") myId = msg.i;        // which slot am I
+      else if (msg.t === "m") MAZE = msg.m;     // host's maze for this round
       else if (msg.t === "s") applyState(msg);
     }
   }
@@ -851,7 +893,6 @@
   function handleDisconnect() {
     if (mode !== "host" && mode !== "guest") return;   // only while in a live session
     conn = null;
-    guestInput.fwd = guestInput.back = guestInput.left = guestInput.right = guestInput.fire = false;
     mode = "lobby";
     setActiveBtns(); setControlsLegend();
     bannerBig.textContent = "DISCONNECTED";
@@ -951,8 +992,11 @@
       role = "host";
       bindConn(c, () => {
         mode = "host"; setActiveBtns(); setControlsLegend();
+        players = [mkTank(0, "local"), mkTank(1, "remote")];
+        myId = 0;
+        updateScoreboard();
+        netSend({ t: "you", i: 1 });           // tell the guest its slot
         setNetStatus('Connected! You are <b style="color:var(--p1)">BLUE</b>.');
-        resetScores();
         startRound();
       });
     });
@@ -1029,8 +1073,8 @@
   function setNetStatus(html) { netStatus.innerHTML = html; }
 
   function resetScores() {
-    score1 = 0; score2 = 0;
-    s1El.textContent = 0; s2El.textContent = 0;
+    players.forEach((p) => (p.score = 0));
+    updateScoreboard();
     lastWinner = null;
   }
 
@@ -1065,6 +1109,7 @@
     setActiveBtns();
     setControlsLegend();
     if (m === "lobby") {
+      setupPlayers("lobby");                // empty roster until connected
       setNetStatus("");
       joinCode.value = "";
       resetScores();
@@ -1073,6 +1118,7 @@
       bannerSub.innerHTML = "Host a game and share the code, or enter a friend's code to join.";
       banner.classList.add("show");
     } else {
+      setupPlayers(m);                      // ai / 2p roster
       resetScores();
       startRound();
     }
@@ -1164,7 +1210,8 @@
     if (ctrlScheme !== "stick") return;           // D-pad mode drives keys directly
     if (!jsEngaged) return;                       // idle => leave keys to the keyboard
     if (jsMag < JS_DEAD) { keys["w"] = keys["a"] = keys["s"] = keys["d"] = false; return; }
-    const myTank = mode === "guest" ? red : blue; // guest drives Red, everyone else Blue
+    const myTank = players[myId];                 // the tank this device controls
+    if (!myTank) return;
     const desired = Math.atan2(jsDY, jsDX);
     const fwdDiff = angleDiff(myTank.angle, desired);             // turn to face the stick
     const revDiff = angleDiff(myTank.angle, desired + Math.PI);   // turn to back toward it
