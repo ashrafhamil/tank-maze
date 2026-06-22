@@ -129,6 +129,16 @@
     text-align: center;
     text-transform: uppercase;
   }
+  #nameInput {
+    background: #222a1a;
+    color: var(--ink);
+    border: 1px solid #4f6238;
+    border-radius: 4px;
+    padding: 6px 10px;
+    width: 110px;
+    font-family: inherit;
+    font-size: 14px;
+  }
   #netStatus { opacity: 0.85; }
   #netStatus b { color: #ffe27a; letter-spacing: 3px; font-size: 14px; }
   #stats {
@@ -258,6 +268,7 @@
   </div>
 
   <div id="onlinePanel">
+    <input id="nameInput" type="text" maxlength="12" placeholder="Your name" autocomplete="off" />
     <button id="submodeToggle" type="button">Mode: Last Standing</button>
     <button id="hostBtn">Host Game</button>
     <span style="opacity:0.6">or join:</span>
@@ -438,6 +449,7 @@
     constructor(index) {
       this.index = index;
       this.name = COLORS[index].name;
+      this.label = "";              // custom player name (falls back to color name)
       this.css = COLORS[index].css;
       this.kind = "local";          // local | local2 | ai | remote
       this.x = 0; this.y = 0; this.angle = 0;
@@ -587,11 +599,23 @@
     showResult(lastWinner);
   }
 
+  // ---- Player display names (custom, falls back to color) ----
+  const nameInput = document.getElementById("nameInput");
+  try { nameInput.value = (localStorage.getItem("tm_name") || "").slice(0, 12); } catch (_) {}
+  nameInput.addEventListener("input", () => {
+    try { localStorage.setItem("tm_name", nameInput.value.slice(0, 12)); } catch (_) {}
+  });
+  function myDisplayName() { return (nameInput.value || "").trim().slice(0, 12); }
+  function dn(p) { return p && p.label ? p.label : (p ? p.name : ""); }   // display name
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
   function updateScoreboard() {
     const present = players.filter(Boolean);
     scoreboardEl.innerHTML = present.map((p) =>
       '<div class="score" style="color:' + p.css + '">' +
-      '<span class="dot" style="background:' + p.css + '"></span>' + p.score + ' ' + p.name +
+      '<span class="dot" style="background:' + p.css + '"></span>' + p.score + ' ' + esc(dn(p)) +
       '</div>'
     ).join("");
   }
@@ -605,7 +629,7 @@
     } else {
       const p = players[w];
       const lose = mode === "ai" && w !== 0;   // 1v1 vs computer; you are index 0
-      bannerBig.textContent = lose ? "YOU LOSE" : ((p ? p.name.toUpperCase() : "WINNER") + (lose ? "" : " WINS"));
+      bannerBig.textContent = lose ? "YOU LOSE" : ((p ? dn(p).toUpperCase() : "WINNER") + (lose ? "" : " WINS"));
       bannerBig.style.color = p ? p.css : "var(--ink)";
     }
     bannerSub.innerHTML = 'Press <kbd>Space</kbd> or <kbd>Enter</kbd> to play next round';
@@ -879,7 +903,7 @@
       t: "s",
       ps: players.filter(Boolean).map((p) => ({
         i: p.index, x: Math.round(p.x), y: Math.round(p.y),
-        a: +p.angle.toFixed(3), al: p.alive, sc: p.score,
+        a: +p.angle.toFixed(3), al: p.alive, sc: p.score, nm: p.label,
       })),
       bl: bullets.map((b) => [Math.round(b.x), Math.round(b.y)]),
       ro: roundOver, w: lastWinner, md: submode,
@@ -905,7 +929,7 @@
       if (ps.i > maxI) maxI = ps.i;
       let p = players[ps.i];
       if (!p) p = players[ps.i] = mkTank(ps.i, "remote");
-      p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc;
+      p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc; p.label = ps.nm || "";
     }
     for (let i = 0; i <= maxI; i++) if (!present.has(i)) players[i] = null;
     players.length = maxI + 1;
@@ -934,6 +958,7 @@
     const slot = freeSlot();
     if (slot < 0) { try { c.close(); } catch (_) {} return; }   // room full
     if (!players[0]) players[0] = mkTank(0, "local");
+    players[0].label = myDisplayName();        // host's own name
     myId = 0;
     players[slot] = mkTank(slot, "remote");
     conns.push({ conn: c, slot, lastMsg: performance.now() });
@@ -952,6 +977,9 @@
     if (msg.t === "i") {
       const p = players[slot];
       if (p) { p.input.fwd = !!msg.f; p.input.back = !!msg.b; p.input.left = !!msg.l; p.input.right = !!msg.r; p.input.fire = !!msg.x; }
+    } else if (msg.t === "nm") {
+      const p = players[slot];
+      if (p) { p.label = String(msg.name || "").trim().slice(0, 12); updateScoreboard(); }
     } else if (msg.t === "start") {
       if (roundOver) startRound();               // any player can trigger the next round
     }
@@ -1124,7 +1152,8 @@
       const c = peer.connect("tankmaze-" + code, { reliable: true });
       bindConn(c, () => {
         mode = "guest"; setActiveBtns(); setControlsLegend();
-        setNetStatus("Connected! Joining the battle…");   // color shown in the legend
+        netSend({ t: "nm", name: myDisplayName() });        // tell host my name
+        setNetStatus("Connected! Joining the battle…");
         banner.classList.remove("show");
       });
     }
@@ -1183,7 +1212,7 @@
   function setControlsLegend() {
     if (mode === "host" || mode === "guest") {
       const me = players[myId];
-      const nm = me ? me.name : "You";
+      const nm = esc(myDisplayName() || (me ? dn(me) : "You"));
       const css = me ? me.css : "var(--ink)";
       controlsEl.innerHTML =
         '<div>You are <b style="color:' + css + '">' + nm + '</b> &nbsp;' +
