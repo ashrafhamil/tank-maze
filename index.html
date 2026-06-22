@@ -938,6 +938,7 @@
     players[slot] = mkTank(slot, "remote");
     conns.push({ conn: c, slot, lastMsg: performance.now() });
     try { c.send({ t: "you", i: slot }); } catch (_) {}
+    try { c.send({ t: "m", m: MAZE }); } catch (_) {}   // current maze (esp. for late joiners)
     mode = "host"; setActiveBtns(); setControlsLegend();
     updateScoreboard();
     if (conns.length === 1) startRound();        // first guest -> fresh round for all
@@ -1387,6 +1388,7 @@
       i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score, rs: p.respawnIn,
     }));
     window.__tmMode = () => mode;
+    window.__tmMaze = () => MAZE.join("\n");
     window.__tmSub = () => submode;
     window.__tmRoundOver = () => roundOver;
     window.__tmKill = (slot, bySlot) => { const v = players[slot]; if (v) onKill({ owner: players[bySlot] }, v); };
