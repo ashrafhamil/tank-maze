@@ -130,6 +130,11 @@
     min-width: 38px;
     text-align: right;
   }
+  .hint {
+    opacity: 0.5;
+    font-size: 11px;
+    margin-top: -4px;
+  }
   #joinCode {
     background: #222a1a;
     color: var(--ink);
@@ -289,6 +294,7 @@
       <button id="hostBtn">Host Game</button>
       <button id="copyLinkBtn" style="display:none">Copy Link</button>
     </div>
+    <div id="modeHint" class="hint"></div>
     <div class="olRow">
       <span class="olLabel">Join</span>
       <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
@@ -1271,8 +1277,15 @@
   mode2PBtn.addEventListener("click", () => setMode("2p"));
   modeOnlineBtn.addEventListener("click", () => setMode("lobby"));
   const submodeToggle = document.getElementById("submodeToggle");
+  const modeHint = document.getElementById("modeHint");
+  const SUBMODE_HINT = {
+    standing: "Last tank alive wins the round.",
+    respawn: "Respawn on death — most kills wins.",
+  };
   function updateSubmodeLabel() {
     submodeToggle.textContent = "Mode: " + (hostSubmode === "respawn" ? "Deathmatch" : "Last Standing");
+    modeHint.textContent = SUBMODE_HINT[hostSubmode];
+    submodeToggle.title = SUBMODE_HINT[hostSubmode];   // desktop hover bonus
   }
   submodeToggle.addEventListener("click", () => {
     hostSubmode = hostSubmode === "standing" ? "respawn" : "standing";
