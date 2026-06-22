@@ -291,7 +291,7 @@
     <div class="olRow">
       <span class="olLabel">Host</span>
       <button id="submodeToggle" type="button">Mode: Last Standing</button>
-      <button id="targetToggle" type="button">First to: Off</button>
+      <button id="targetToggle" type="button">First to: ∞</button>
       <button id="hostBtn">Host Game</button>
       <button id="copyLinkBtn" style="display:none">Copy Link</button>
     </div>
@@ -1330,7 +1330,7 @@
   const targetToggle = document.getElementById("targetToggle");
   const TARGETS = [0, 10, 20, 30];
   function updateTargetLabel() {
-    targetToggle.textContent = "First to: " + (hostTarget ? hostTarget : "Off");
+    targetToggle.textContent = "First to: " + (hostTarget ? hostTarget : "∞");
     targetToggle.title = hostTarget ? ("Match ends when someone reaches " + hostTarget) : "Endless — no match limit";
   }
   targetToggle.addEventListener("click", () => {
