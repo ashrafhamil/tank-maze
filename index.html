@@ -291,6 +291,7 @@
     <div class="olRow">
       <span class="olLabel">Host</span>
       <button id="submodeToggle" type="button">Mode: Last Standing</button>
+      <button id="targetToggle" type="button">First to: Off</button>
       <button id="hostBtn">Host Game</button>
       <button id="copyLinkBtn" style="display:none">Copy Link</button>
     </div>
@@ -447,7 +448,8 @@
       guestSuppressFire = true;            // don't auto-fire the round-start press
       netSend({ t: "start" });             // only host owns startRound
     } else if (mode === "ai" || mode === "2p" || mode === "host") {
-      startRound();
+      if (matchOver) resetMatch();
+      else startRound();
     }
   }
 
@@ -560,6 +562,9 @@
   let submode = "standing";     // "standing" (last alive wins) | "respawn" (deathmatch)
   let hostSubmode = "standing"; // host's pick before hosting
   const RESPAWN_DELAY = 2.0;    // seconds dead before respawning (deathmatch)
+  let matchOver = false;        // someone hit the target -> match frozen until rematch
+  let matchTarget = 0;          // 0 = endless; else win at N (kills / round wins)
+  let hostTarget = 0;           // host's pick before hosting
 
   function mkTank(index, kind) { const t = new Tank(index); t.kind = kind; return t; }
   // Roster for a local mode. Online rosters are managed by the connection
@@ -607,6 +612,7 @@
     players.forEach((p, i) => p && p.reset(cells[i]));
     bullets = [];
     roundOver = false;
+    matchOver = false;
     lastWinner = null;
     endTimer = 0;
     keys[" "] = false;       // consume the Space/Enter that started the round
@@ -621,7 +627,16 @@
     if (winner) winner.score++;
     lastWinner = winner ? winner.index : "draw";
     updateScoreboard();
+    if (winner && matchTarget > 0 && winner.score >= matchTarget) matchOver = true;
     showResult(lastWinner);
+  }
+
+  // Restart a finished match: zero scores, fresh maze, everyone back in.
+  function resetMatch() {
+    players.forEach((p) => p && (p.score = 0));
+    matchOver = false;
+    updateScoreboard();
+    startRound();
   }
 
   // ---- Player display names (custom, falls back to color) ----
@@ -640,7 +655,7 @@
     const present = players.filter(Boolean);
     scoreboardEl.innerHTML = present.map((p) =>
       '<div class="score" style="color:' + p.css + '">' +
-      '<span class="dot" style="background:' + p.css + '"></span>' + p.score + ' ' + esc(dn(p)) +
+      '<span class="dot" style="background:' + p.css + '"></span>' + p.score + (matchTarget ? '/' + matchTarget : '') + ' ' + esc(dn(p)) +
       '</div>'
     ).join("");
   }
@@ -648,6 +663,14 @@
   // Banner text for a finished round (winner = player index | "draw").
   // Host shows it locally; guest shows it from the synced winner.
   function showResult(w) {
+    if (matchOver) {
+      const mp = (w !== "draw" && w != null) ? players[w] : null;
+      bannerBig.textContent = (mp ? dn(mp).toUpperCase() : "MATCH") + " WINS THE MATCH";
+      bannerBig.style.color = mp ? mp.css : "var(--ink)";
+      bannerSub.innerHTML = 'Press <kbd>Space</kbd> to rematch';
+      banner.classList.add("show");
+      return;
+    }
     if (w === "draw" || w == null) {
       bannerBig.textContent = "DRAW";
       bannerBig.style.color = "var(--ink)";
@@ -795,7 +818,12 @@
     if (submode === "respawn") {
       victim.respawnIn = RESPAWN_DELAY;
       const killer = bullet.owner;
-      if (killer && killer !== victim) { killer.score++; updateScoreboard(); }  // frag
+      if (killer && killer !== victim) {
+        killer.score++; updateScoreboard();                          // frag
+        if (matchTarget > 0 && killer.score >= matchTarget) {
+          matchOver = true; roundOver = true; lastWinner = killer.index; showResult(lastWinner);
+        }
+      }
     }
   }
 
@@ -931,7 +959,7 @@
         a: +p.angle.toFixed(3), al: p.alive, sc: p.score, nm: p.label,
       })),
       bl: bullets.map((b) => [Math.round(b.x), Math.round(b.y)]),
-      ro: roundOver, w: lastWinner, md: submode,
+      ro: roundOver, w: lastWinner, md: submode, mo: matchOver, tg: matchTarget,
     });
   }
 
@@ -947,6 +975,8 @@
   // ---- Guest: apply host state (roster can be sparse — slots may be empty) ----
   function applyState(m) {
     if (m.md) submode = m.md;
+    matchTarget = m.tg || 0;
+    matchOver = !!m.mo;
     const present = new Set();
     let maxI = -1;
     for (const ps of m.ps) {
@@ -1006,7 +1036,8 @@
       const p = players[slot];
       if (p) { p.label = String(msg.name || "").trim().slice(0, 12); updateScoreboard(); }
     } else if (msg.t === "start") {
-      if (roundOver) startRound();               // any player can trigger the next round
+      if (matchOver) resetMatch();               // any player can trigger rematch / next round
+      else if (roundOver) startRound();
     }
   }
   function removeGuest(slot) {
@@ -1027,7 +1058,8 @@
     if (mode !== "host") return;
     const n = conns.length + 1;
     const mn = submode === "respawn" ? "Deathmatch" : "Last Standing";
-    setNetStatus('Hosting <b>' + roomCode + '</b> · ' + mn + ' · ' + n + ' player' + (n === 1 ? "" : "s") +
+    const tg = matchTarget ? " · first to " + matchTarget : "";
+    setNetStatus('Hosting <b>' + roomCode + '</b> · ' + mn + tg + ' · ' + n + ' player' + (n === 1 ? "" : "s") +
       '. You are <b style="color:' + COLORS[0].css + '">Blue</b>.');
   }
 
@@ -1107,6 +1139,7 @@
     if (!window.Peer) { setNetStatus("Online needs internet — PeerJS didn't load."); return; }
     teardownNet();
     submode = hostSubmode;          // lock in the chosen match type
+    matchTarget = hostTarget;       // and the win target (0 = endless)
     mode = "lobby"; setActiveBtns(); setControlsLegend();
     setNetStatus("Starting…");
     const ice = await getIceServers();
@@ -1293,6 +1326,19 @@
     submodeToggle.blur();
   });
   updateSubmodeLabel();
+
+  const targetToggle = document.getElementById("targetToggle");
+  const TARGETS = [0, 10, 20, 30];
+  function updateTargetLabel() {
+    targetToggle.textContent = "First to: " + (hostTarget ? hostTarget : "Off");
+    targetToggle.title = hostTarget ? ("Match ends when someone reaches " + hostTarget) : "Endless — no match limit";
+  }
+  targetToggle.addEventListener("click", () => {
+    hostTarget = TARGETS[(TARGETS.indexOf(hostTarget) + 1) % TARGETS.length];
+    updateTargetLabel();
+    targetToggle.blur();
+  });
+  updateTargetLabel();
   hostBtn.addEventListener("click", () => { startHost(); hostBtn.blur(); });
   joinBtn.addEventListener("click", () => { startGuest(joinCode.value); joinBtn.blur(); });
   joinCode.addEventListener("keydown", (e) => {
