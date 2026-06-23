@@ -272,6 +272,11 @@
   #ctrlToggleRow { display: none; }
   #ctrlToggle { font-size: 11px; padding: 5px 12px; opacity: 0.85; }
 
+  #menuToggle {
+    display: none;
+    position: fixed; top: 6px; right: 8px; z-index: 40;
+    font-size: 12px; padding: 6px 10px; opacity: 0.92;
+  }
   @media (pointer: coarse) {
     body { gap: 8px; padding: 6px 0; justify-content: flex-start; }
     h1 { font-size: 15px; margin-top: 4px; }
@@ -280,10 +285,18 @@
     #controls { display: none; }   /* keyboard legend irrelevant on phones */
     #mode2P { display: none; }     /* local 2P needs 2 keyboards — not playable on one phone */
     button { padding: 8px 12px; }  /* bigger tap targets for mode/online */
+    /* While playing, hide the setup menu so the controls sit right under the maze.
+       The floating ☰ button brings it back (to leave / change mode). */
+    body.ingame #menuToggle { display: inline-block; }
+    body.ingame:not(.menuopen) #modebar,
+    body.ingame:not(.menuopen) #onlinePanel,
+    body.ingame:not(.menuopen) #aiPanel,
+    body.ingame:not(.menuopen) #stats { display: none !important; }
   }
 </style>
 </head>
 <body>
+  <button id="menuToggle" type="button">☰ Menu</button>
   <h1>rete kebe fire!</h1>
   <div id="scoreboard">
     <div class="score p1"><span class="dot"></span><span id="s1">0</span> Blue</div>
@@ -1314,7 +1327,7 @@
     conns.push({ conn: c, slot, lastMsg: performance.now() });
     try { c.send({ t: "you", i: slot }); } catch (_) {}
     try { c.send({ t: "m", m: MAZE }); } catch (_) {}   // current maze (esp. for late joiners)
-    mode = "host"; setActiveBtns(); setControlsLegend();
+    mode = "host"; document.body.classList.remove("menuopen"); setActiveBtns(); setControlsLegend();
     updateScoreboard();
     if (conns.length === 1) startRound();        // first guest -> fresh round for all
     else players[slot].reset(randFloor());        // late joiner spawns straight in
@@ -1504,7 +1517,7 @@
       role = "guest";
       const c = peer.connect("tankmaze-" + code, { reliable: true });
       bindConn(c, () => {
-        mode = "guest"; setActiveBtns(); setControlsLegend();
+        mode = "guest"; document.body.classList.remove("menuopen"); setActiveBtns(); setControlsLegend();
         netSend({ t: "nm", name: myDisplayName() });        // tell host my name
         setNetStatus("Connected! Joining the battle…");
         banner.classList.remove("show");
@@ -1562,6 +1575,11 @@
     modeOnlineBtn.classList.toggle("active", online);
     onlinePanel.style.display = online ? "flex" : "none";
     aiPanel.style.display = mode === "ai" ? "flex" : "none";
+    // "in a game" => collapse the setup menu on phones (see CSS). Lobby shows it.
+    document.body.classList.toggle("ingame", mode !== "lobby");
+    if (mode === "lobby") document.body.classList.remove("menuopen");
+    const mt = document.getElementById("menuToggle");
+    if (mt) mt.textContent = document.body.classList.contains("menuopen") ? "✕ Close" : "☰ Menu";
   }
 
   function setControlsLegend() {
@@ -1606,6 +1624,14 @@
   modeAIBtn.addEventListener("click", () => setMode("ai"));
   mode2PBtn.addEventListener("click", () => setMode("2p"));
   modeOnlineBtn.addEventListener("click", () => setMode("lobby"));
+
+  // Floating menu toggle (phones): reveal/hide the setup menu while playing.
+  const menuToggle = document.getElementById("menuToggle");
+  menuToggle.addEventListener("click", () => {
+    const open = document.body.classList.toggle("menuopen");
+    menuToggle.textContent = open ? "✕ Close" : "☰ Menu";
+    menuToggle.blur();
+  });
 
   // Bot difficulty (VS Computer)
   const aiLevelToggle = document.getElementById("aiLevelToggle");
