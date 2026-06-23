@@ -643,7 +643,14 @@
 
   // ---- Net state ----
   let peer = null, conn = null, role = null;   // role: "host" | "guest"
-  let conns = [];                              // host: [{conn, slot, lastMsg}]
+  let conns = [];                              // host: [{conn, slot, cid, lastMsg}]
+  // stable per-browser id so a guest who reconnects (e.g. after backgrounding the
+  // tab) returns to the SAME colour slot instead of joining as a new player
+  let clientId;
+  try {
+    clientId = localStorage.getItem("tm_cid");
+    if (!clientId) { clientId = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem("tm_cid", clientId); }
+  } catch (_) { clientId = Math.random().toString(36).slice(2); }
   let guestSuppressFire = false;               // guest: swallow the round-start Space
   let lastPeerMsg = 0;                          // perf-time of last packet from the other side
   const STALE_MS = 10000;                       // no packets this long => treat as disconnected
@@ -1331,24 +1338,52 @@
   }
 
   // ---- Host: per-connection plumbing ----
+  const cidSlots = {};   // remember which colour slot each client id had (for reconnects)
   function freeSlot() {
     for (let i = 1; i < MAX_PLAYERS; i++) if (!players[i]) return i;  // slot 0 = host
     return -1;
   }
-  function onGuestOpen(c) {
-    const slot = freeSlot();
-    if (slot < 0) { try { c.close(); } catch (_) {} return; }   // room full
+  function slotForCid(cid) {
+    const want = cidSlots[cid];
+    if (want != null && !players[want]) return want;   // give them their old colour back
+    return freeSlot();
+  }
+  // A guest announces itself (name + stable client id). The slot is assigned HERE,
+  // by identity — so backgrounding/reconnecting returns to the SAME colour instead
+  // of joining as a new player. A re-sent announce just updates the name.
+  function handleJoin(c, cidRaw, nameRaw) {
+    const cid = cidRaw || ("anon-" + Math.random().toString(36).slice(2));
+    const name = String(nameRaw || "").trim().slice(0, 12);
+    const mine = conns.find((x) => x.conn === c);
+    if (mine) { if (players[mine.slot]) { players[mine.slot].label = name; updateScoreboard(); } return; }
+
+    let slot, fresh;
+    const prior = conns.find((x) => x.cid === cid);   // same person on an older, lingering conn
+    if (prior) {
+      try { prior.conn.close(); } catch (_) {}
+      conns = conns.filter((x) => x !== prior);
+      slot = prior.slot; fresh = !players[slot];      // keep their tank (+ score) if still around
+    } else {
+      slot = slotForCid(cid);
+      if (slot < 0) { try { c.close(); } catch (_) {} return; }   // room full
+      fresh = !players[slot];
+    }
+
     if (!players[0]) players[0] = mkTank(0, "local");
-    players[0].label = myDisplayName();        // host's own name
+    players[0].label = myDisplayName();
     myId = 0;
-    players[slot] = mkTank(slot, "remote");
-    conns.push({ conn: c, slot, lastMsg: performance.now() });
+    if (fresh) players[slot] = mkTank(slot, "remote");
+    players[slot].cid = cid;
+    players[slot].label = name;
+    cidSlots[cid] = slot;
+    conns.push({ conn: c, slot, cid, lastMsg: performance.now() });
+
     try { c.send({ t: "you", i: slot }); } catch (_) {}
-    try { c.send({ t: "m", m: MAZE }); } catch (_) {}   // current maze (esp. for late joiners)
+    try { c.send({ t: "m", m: MAZE }); } catch (_) {}
     mode = "host"; document.body.classList.remove("menuopen"); setActiveBtns(); setControlsLegend();
     updateScoreboard();
-    if (conns.length === 1) startRound();        // first guest -> fresh round for all
-    else players[slot].reset(randFloor());        // late joiner spawns straight in
+    if (conns.length === 1 && fresh) startRound();    // first player in -> fresh round
+    else if (fresh) players[slot].reset(randFloor()); // late joiner spawns straight in
     hostStatus();
   }
   function onHostData(slot, msg) {
@@ -1358,9 +1393,6 @@
     if (msg.t === "i") {
       const p = players[slot];
       if (p) { p.input.fwd = !!msg.f; p.input.back = !!msg.b; p.input.left = !!msg.l; p.input.right = !!msg.r; p.input.fire = !!msg.x; }
-    } else if (msg.t === "nm") {
-      const p = players[slot];
-      if (p) { p.label = String(msg.name || "").trim().slice(0, 12); updateScoreboard(); }
     } else if (msg.t === "start") {
       if (matchOver) resetMatch();               // any player can trigger rematch / next round
       else if (roundOver) startRound();
@@ -1501,8 +1533,10 @@
     });
     peer.on("connection", (c) => {
       role = "host";
-      c.on("open", () => onGuestOpen(c));
-      c.on("data", (msg) => { const e = conns.find((x) => x.conn === c); if (e) onHostData(e.slot, msg); });
+      c.on("data", (msg) => {
+        if (msg && msg.t === "nm") handleJoin(c, msg.cid, msg.name);   // announce/identity -> (re)assign slot
+        else { const e = conns.find((x) => x.conn === c); if (e) onHostData(e.slot, msg); }
+      });
       c.on("close", () => { const e = conns.find((x) => x.conn === c); if (e) removeGuest(e.slot); });
       c.on("error", () => {});
     });
@@ -1536,7 +1570,7 @@
       const c = peer.connect("tankmaze-" + code, { reliable: true });
       bindConn(c, () => {
         mode = "guest"; document.body.classList.remove("menuopen"); setActiveBtns(); setControlsLegend();
-        netSend({ t: "nm", name: myDisplayName() });        // tell host my name
+        netSend({ t: "nm", name: myDisplayName(), cid: clientId });   // announce identity + name
         setNetStatus("Connected! Joining the battle…");
         banner.classList.remove("show");
       });
@@ -1854,7 +1888,7 @@
   // Read-only test hook (only when the URL contains "debug"); no effect otherwise.
   if (location.search.indexOf("debug") >= 0) {
     window.__tmState = () => players.filter(Boolean).map((p) => ({
-      i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score, rs: p.respawnIn, bf: p.bf,
+      i: p.index, x: Math.round(p.x), y: Math.round(p.y), a: +p.angle.toFixed(3), al: p.alive, sc: p.score, rs: p.respawnIn, bf: p.bf, cid: p.cid,
     }));
     window.__tmMode = () => mode;
     window.__tmPow = () => powerups.map((r) => ({ type: r.type, x: Math.round(r.x), y: Math.round(r.y) }));
@@ -1873,6 +1907,15 @@
     window.__tmRoundOver = () => roundOver;
     window.__tmKill = (slot, bySlot) => { const v = players[slot]; if (v) onKill({ owner: players[bySlot] }, v); };
   }
+
+  // Returning from a backgrounded tab: re-announce so the host re-attaches us to
+  // our slot (it may have pruned us while we were away) instead of leaving a ghost.
+  // The stable cid keeps our colour.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && mode === "guest" && conn && conn.open) {
+      netSend({ t: "nm", name: myDisplayName(), cid: clientId });
+    }
+  });
 
   // ---- Boot ----
   // A "?room=CODE" link (shared by a host) drops the friend straight into joining.
