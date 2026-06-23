@@ -521,7 +521,7 @@
       this.cooldown = 0; this.alive = false;
       this.score = 0; this.respawnIn = 0;
       this.input = { fwd: false, back: false, left: false, right: false, fire: false };
-      this.aiTurnGoal = 0; this.aiRepathIn = 0; this.aiNext = null; this.aiDodgeT = 0;
+      this.aiTurnGoal = 0; this.aiRepathIn = 0; this.aiNext = null; this.aiGoal = null; this.aiDodgeT = 0;
       this.prevX = 0; this.prevY = 0; this.vx = 0; this.vy = 0;   // velocity (for AI lead-aim)
       this.buffs = { speed: 0, rapid: 0, bounce: 0 };  // remaining seconds each
       this.bf = 0;                  // buff bitmask (for render; synced to guests)
@@ -536,7 +536,7 @@
       this.respawnIn = 0;
       this.input.fwd = this.input.back = this.input.left = this.input.right = this.input.fire = false;
       this.aiTurnGoal = this.angle;
-      this.aiRepathIn = 0; this.aiNext = null; this.aiDodgeT = 0;
+      this.aiRepathIn = 0; this.aiNext = null; this.aiGoal = null; this.aiDodgeT = 0;
       this.prevX = this.x; this.prevY = this.y; this.vx = 0; this.vy = 0;
       this.buffs.speed = this.buffs.rapid = this.buffs.bounce = 0;
       this.bf = 0;
@@ -812,6 +812,47 @@
     while (p !== -1 && p !== start) { cur = p; p = prev.get(p); }   // walk back to first step
     return { c: cur % COLS, r: (cur - (cur % COLS)) / COLS };
   }
+  // BFS over the whole floor from `from`; returns step-distance + parent for every reachable cell.
+  function bfsField(from) {
+    const key = (c, r) => r * COLS + c;
+    const start = key(from.c, from.r);
+    const dist = new Map([[start, 0]]), prev = new Map([[start, -1]]);
+    const q = [start], dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (let h = 0; h < q.length; h++) {
+      const cur = q[h], cc = cur % COLS, cr = (cur - cc) / COLS;
+      for (const [dc, dr] of dirs) {
+        const nc = cc + dc, nr = cr + dr;
+        if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || isWallCell(nc, nr)) continue;
+        const nk = key(nc, nr);
+        if (dist.has(nk)) continue;
+        dist.set(nk, dist.get(cur) + 1); prev.set(nk, cur); q.push(nk);
+      }
+    }
+    return { dist, prev, start };
+  }
+  const FIRE_MIN = TILE * 2.5, FIRE_MAX = TILE * 7;   // bot's preferred shooting band
+  // Tactical goal CELL: the nearest-by-path floor cell that can SEE the target
+  // from a shooting distance (not point-blank). Picks randomly among the closest
+  // few so the bot flanks from varying spots instead of charging the same corner.
+  function pickFiringCell(self, target) {
+    const field = bfsField(cellOf(self.x, self.y));
+    const spots = [];
+    for (const [k, d] of field.dist) {
+      const cc = k % COLS, cr = (k - cc) / COLS;
+      const cx = cc * TILE + TILE / 2, cy = cr * TILE + TILE / 2;
+      const td = Math.hypot(target.x - cx, target.y - cy);
+      if (td < FIRE_MIN || td > FIRE_MAX) continue;
+      if (!hasLineOfSight(cx, cy, target.x, target.y)) continue;
+      spots.push({ k, d });
+    }
+    if (!spots.length) return null;
+    spots.sort((a, b) => a.d - b.d);
+    const k = spots.slice(0, Math.min(4, spots.length))[(Math.random() * Math.min(4, spots.length)) | 0].k;
+    return { c: k % COLS, r: (k - (k % COLS)) / COLS };
+  }
+  function cellReached(self, cell) {
+    return cell && Math.hypot((cell.c * TILE + TILE / 2) - self.x, (cell.r * TILE + TILE / 2) - self.y) < TILE * 0.5;
+  }
 
   // Aim heading at the target; Hard leads the shot using the target's velocity.
   function aimAngle(self, target, hard) {
@@ -855,7 +896,10 @@
     if (los && Math.abs(diff) < 0.20 && self.canFire()) self.fire(bullets);
   }
 
-  // MEDIUM / HARD: BFS-hunt, grab runes, dodge bullets, aim & fire (Hard leads shots + repaths faster).
+  // MEDIUM / HARD: don't blindly charge — approach to a line-of-sight firing spot
+  // at range and snipe. Grab runes, dodge bullets, kite if the player closes in.
+  // Commits to a goal cell (no per-frame re-randomizing) so it actually arrives.
+  // (Hard leads shots + repaths faster.)
   function updateAISmart(self, dt, hard) {
     const target = nearestOpponent(self);
     if (!target) return;
@@ -871,29 +915,26 @@
       self.aiDodgeT = 0.4;
     }
 
-    let desired, dodging = false;
+    let desired, move = true;
     if (self.aiDodgeT > 0) {
-      desired = self.aiTurnGoal; dodging = true;                   // commit the swerve briefly
-    } else if (los && targDist < TILE * 6) {
-      desired = aimA;                                              // close + visible: aim
+      desired = self.aiTurnGoal;                                   // commit the swerve briefly
+    } else if (los && targDist >= FIRE_MIN && targDist <= FIRE_MAX) {
+      desired = aimA; move = false; self.aiGoal = null;            // good range + sight: hold & snipe
     } else {
-      // pick a goal — a nearby rune detour, else the enemy — and path to it
-      let gx = target.x, gy = target.y;
-      const rn = nearestRune(self);
-      if (rn && rn.dist < targDist * 0.9) { gx = rn.rune.x; gy = rn.rune.y; }
-      self.aiRepathIn -= dt;
-      if (self.aiRepathIn <= 0 || !self.aiNext) {
-        self.aiRepathIn = hard ? 0.12 : 0.25;
-        self.aiNext = bfsNext(cellOf(self.x, self.y), cellOf(gx, gy));
+      // commit to a goal cell until reached (no mid-approach re-randomizing, or it
+      // thrashes and never arrives). The los-snipe branch above interrupts en route.
+      if (!self.aiGoal || cellReached(self, self.aiGoal)) {
+        const rn = nearestRune(self);
+        if (rn && rn.dist < targDist * 0.7) self.aiGoal = cellOf(rn.rune.x, rn.rune.y);
+        else self.aiGoal = pickFiringCell(self, target) || cellOf(target.x, target.y);
       }
-      if (self.aiNext) {
-        const nx = self.aiNext.c * TILE + TILE / 2, ny = self.aiNext.r * TILE + TILE / 2;
-        if (Math.hypot(nx - self.x, ny - self.y) < TILE * 0.4) self.aiNext = null;  // reached step
-        desired = Math.atan2(ny - self.y, nx - self.x);
+      const step = bfsNext(cellOf(self.x, self.y), self.aiGoal);
+      if (step) {
+        desired = Math.atan2((step.r * TILE + TILE / 2) - self.y, (step.c * TILE + TILE / 2) - self.x);
       } else if (los) {
         desired = aimA;
       } else {
-        self.aiTurnGoal = self.angle + (Math.random() - 0.5) * Math.PI;             // fallback wander
+        self.aiTurnGoal = self.angle + (Math.random() - 0.5) * Math.PI;                 // fallback wander
         desired = self.aiTurnGoal;
       }
     }
@@ -902,13 +943,11 @@
     const turn = TANK_TURN * dt;
     self.angle += Math.max(-turn, Math.min(turn, diff));
 
-    // hold position to aim only when close, visible, and roughly lined up
-    const holdToAim = los && !dodging && targDist < TILE * 4 && Math.abs(diff) < 0.5;
-    if (!holdToAim) {
+    if (move) {
       const before = { x: self.x, y: self.y };
       self.tryMove(TANK_SPEED * (self.buffs.speed > 0 ? SPEED_MULT : 1) * dt);
       if (Math.hypot(self.x - before.x, self.y - before.y) < TANK_SPEED * dt * 0.3) {
-        self.aiNext = null; self.aiRepathIn = 0;                   // stuck -> repath next frame
+        self.aiGoal = null; self.aiRepathIn = 0;                   // stuck -> pick a new goal
       }
     }
 
@@ -1778,6 +1817,9 @@
     window.__tmBfs = (fc, fr, tc, tr) => bfsNext({ c: fc, r: fr }, { c: tc, r: tr });
     window.__tmAi = () => aiLevel;
     window.__tmSetAi = (lvl) => { aiLevel = lvl; };
+    window.__tmRestart = () => startRound();
+    window.__tmBot = () => { const b = players[1], a = players[0]; if (!b || !a) return null;
+      return { d: Math.round(Math.hypot(a.x - b.x, a.y - b.y)), los: hasLineOfSight(b.x, b.y, a.x, a.y), bAlive: b.alive, pAlive: a.alive, nb: bullets.length, ro: roundOver }; };
     window.__tmFloors = () => floorCells.map((c) => [c.c, c.r]);
     window.__tmIsWall = (c, r) => isWallCell(c, r);
     // drop a rune onto a tank so the next sim tick picks it up (test helper)
