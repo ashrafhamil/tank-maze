@@ -628,6 +628,8 @@
   let matchOver = false;        // someone hit the target -> match frozen until rematch
   let matchTarget = 0;          // 0 = endless; else win at N (kills / round wins)
   let hostTarget = 0;           // host's pick before hosting
+  let dmKills = 0;              // total kills this deathmatch (drives map rotation)
+  const DM_MAP_EVERY = 10;      // deathmatch: fresh maze every N kills
 
   function mkTank(index, kind) { const t = new Tank(index); t.kind = kind; return t; }
   // Roster for a local mode. Online rosters are managed by the connection
@@ -676,6 +678,7 @@
     bullets = [];
     powerups = [];
     pwTimer = POW_SPAWN_EVERY;
+    dmKills = 0;
     roundOver = false;
     matchOver = false;
     lastWinner = null;
@@ -1050,11 +1053,26 @@
       const killer = bullet.owner;
       if (killer && killer !== victim) {
         killer.score++; updateScoreboard();                          // frag
+        dmKills++;
         if (matchTarget > 0 && killer.score >= matchTarget) {
           matchOver = true; roundOver = true; lastWinner = killer.index; showResult(lastWinner);
+        } else if (dmKills % DM_MAP_EVERY === 0) {
+          newArena();                                                // fresh maze every N kills
         }
       }
     }
+  }
+
+  // Swap in a fresh maze mid-deathmatch: respawn everyone, keep scores.
+  function newArena() {
+    MAZE = generateMaze();
+    recomputeFloors();
+    if (role === "host") broadcast({ t: "m", m: MAZE });
+    const cells = spawnCells(Math.max(1, players.length));
+    players.forEach((p, i) => p && p.reset(cells[i]));
+    bullets = [];
+    powerups = [];
+    pwTimer = POW_SPAWN_EVERY;
   }
 
   // Deathmatch respawn: a floor cell away from any living enemy.
