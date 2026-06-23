@@ -533,6 +533,7 @@
       this.x = 0; this.y = 0; this.angle = 0;
       this.cooldown = 0; this.alive = false;
       this.score = 0; this.respawnIn = 0;
+      this.cid = null; this.disc = false; this.discSince = 0;  // parked-while-away state
       this.input = { fwd: false, back: false, left: false, right: false, fire: false };
       this.aiTurnGoal = 0; this.aiRepathIn = 0; this.aiNext = null; this.aiGoal = null; this.aiDodgeT = 0;
       this.prevX = 0; this.prevY = 0; this.vx = 0; this.vy = 0;   // velocity (for AI lead-aim)
@@ -547,6 +548,7 @@
       this.cooldown = 0;
       this.alive = true;
       this.respawnIn = 0;
+      this.disc = false;          // (re)spawning means back in play
       this.input.fwd = this.input.back = this.input.left = this.input.right = this.input.fire = false;
       this.aiTurnGoal = this.angle;
       this.aiRepathIn = 0; this.aiNext = null; this.aiGoal = null; this.aiDodgeT = 0;
@@ -630,6 +632,7 @@
   let hostTarget = 0;           // host's pick before hosting
   let dmKills = 0;              // total kills this deathmatch (drives map rotation)
   const DM_MAP_EVERY = 10;      // deathmatch: fresh maze every N kills
+  const PARK_GRACE = 30000;     // keep a disconnected player's slot+score this long
 
   function mkTank(index, kind) { const t = new Tank(index); t.kind = kind; return t; }
   // Roster for a local mode. Online rosters are managed by the connection
@@ -729,8 +732,8 @@
   function updateScoreboard() {
     const present = players.filter(Boolean);
     scoreboardEl.innerHTML = present.map((p) =>
-      '<div class="score" style="color:' + p.css + '">' +
-      '<span class="dot" style="background:' + p.css + '"></span>' + p.score + (matchTarget ? '/' + matchTarget : '') + ' ' + esc(dn(p)) +
+      '<div class="score" style="color:' + p.css + (p.disc ? ';opacity:0.5' : '') + '">' +
+      '<span class="dot" style="background:' + p.css + '"></span>' + p.score + (matchTarget ? '/' + matchTarget : '') + ' ' + esc(dn(p)) + (p.disc ? ' (away)' : '') +
       '</div>'
     ).join("");
   }
@@ -1034,7 +1037,7 @@
     if (submode === "respawn") {
       // deathmatch: dead tanks respawn after a delay; never ends on its own
       for (const p of present) {
-        if (!p.alive) { p.respawnIn -= dt; if (p.respawnIn <= 0) respawnTank(p); }
+        if (!p.alive && !p.disc) { p.respawnIn -= dt; if (p.respawnIn <= 0) respawnTank(p); }
       }
     } else {
       // last-standing: round ends when <=1 tank remains
@@ -1252,8 +1255,13 @@
     updateJoystick();         // touch stick -> key state for the controlled tank
 
     if (mode === "host") {
-      // backstop for PeerJS's unreliable close: prune guests that went silent
+      // backstop for PeerJS's unreliable close: park guests that went silent
       for (const e of conns.slice()) if (now - e.lastMsg > STALE_MS) removeGuest(e.slot);
+      // free slots parked longer than the grace window (gone for good)
+      for (let i = 1; i < players.length; i++) {
+        const p = players[i];
+        if (p && p.disc && now - p.discSince > PARK_GRACE) { players[i] = null; updateScoreboard(); }
+      }
       update(dt);
       netAccum += dt;       // stream state ~40Hz
       if (netAccum >= 0.025) { netAccum = 0; sendState(); }
@@ -1287,7 +1295,7 @@
       t: "s",
       ps: players.filter(Boolean).map((p) => ({
         i: p.index, x: Math.round(p.x), y: Math.round(p.y),
-        a: +p.angle.toFixed(3), al: p.alive, sc: p.score, nm: p.label, bf: p.bf,
+        a: +p.angle.toFixed(3), al: p.alive, sc: p.score, nm: p.label, bf: p.bf, dc: p.disc,
       })),
       bl: bullets.map((b) => [Math.round(b.x), Math.round(b.y)]),
       pw: powerups.map((r) => [r.type, Math.round(r.x), Math.round(r.y)]),
@@ -1316,7 +1324,7 @@
       if (ps.i > maxI) maxI = ps.i;
       let p = players[ps.i];
       if (!p) p = players[ps.i] = mkTank(ps.i, "remote");
-      p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc; p.label = ps.nm || ""; p.bf = ps.bf || 0;
+      p.x = ps.x; p.y = ps.y; p.angle = ps.a; p.alive = ps.al; p.score = ps.sc; p.label = ps.nm || ""; p.bf = ps.bf || 0; p.disc = !!ps.dc;
     }
     for (let i = 0; i <= maxI; i++) if (!present.has(i)) players[i] = null;
     players.length = maxI + 1;
@@ -1345,7 +1353,10 @@
   }
   function slotForCid(cid) {
     const want = cidSlots[cid];
-    if (want != null && !players[want]) return want;   // give them their old colour back
+    if (want != null) {
+      const p = players[want];
+      if (!p || (p.disc && p.cid === cid)) return want;   // free, or our own parked slot
+    }
     return freeSlot();
   }
   // A guest announces itself (name + stable client id). The slot is assigned HERE,
@@ -1369,12 +1380,14 @@
       fresh = !players[slot];
     }
 
+    const reviving = !fresh && players[slot] && players[slot].disc;   // returning parked player
     if (!players[0]) players[0] = mkTank(0, "local");
     players[0].label = myDisplayName();
     myId = 0;
     if (fresh) players[slot] = mkTank(slot, "remote");
     players[slot].cid = cid;
     players[slot].label = name;
+    players[slot].disc = false;
     cidSlots[cid] = slot;
     conns.push({ conn: c, slot, cid, lastMsg: performance.now() });
 
@@ -1382,8 +1395,9 @@
     try { c.send({ t: "m", m: MAZE }); } catch (_) {}
     mode = "host"; document.body.classList.remove("menuopen"); setActiveBtns(); setControlsLegend();
     updateScoreboard();
-    if (conns.length === 1 && fresh) startRound();    // first player in -> fresh round
-    else if (fresh) players[slot].reset(randFloor()); // late joiner spawns straight in
+    const needSpawn = fresh || reviving;              // a quick still-alive reconnect keeps its spot
+    if (conns.length === 1 && needSpawn) startRound(); // first/only player in -> fresh round
+    else if (needSpawn) players[slot].reset(randFloor());  // (re)spawn into the ongoing game
     hostStatus();
   }
   function onHostData(slot, msg) {
@@ -1400,7 +1414,11 @@
   }
   function removeGuest(slot) {
     conns = conns.filter((e) => e.slot !== slot);
-    players[slot] = null;
+    const p = players[slot];
+    if (p) {                                   // park: keep slot + score, freeze + exclude from play
+      p.disc = true; p.discSince = performance.now(); p.alive = false;
+      p.input.fwd = p.input.back = p.input.left = p.input.right = p.input.fire = false;
+    }
     updateScoreboard();
     if (conns.length === 0 && (mode === "host")) {
       // everyone left — keep the room open and wait for new joiners
@@ -1896,6 +1914,7 @@
     window.__tmAi = () => aiLevel;
     window.__tmSetAi = (lvl) => { aiLevel = lvl; };
     window.__tmRestart = () => startRound();
+    window.__tmConns = () => conns.map((e) => ({ slot: e.slot, age: Math.round(performance.now() - e.lastMsg) }));
     window.__tmBot = () => { const b = players[1], a = players[0]; if (!b || !a) return null;
       return { d: Math.round(Math.hypot(a.x - b.x, a.y - b.y)), los: hasLineOfSight(b.x, b.y, a.x, a.y), bAlive: b.alive, pAlive: a.alive, nb: bullets.length, ro: roundOver }; };
     window.__tmFloors = () => floorCells.map((c) => [c.c, c.r]);
