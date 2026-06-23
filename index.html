@@ -120,6 +120,11 @@
     padding: 1px 5px;
     font-size: 11px;
   }
+  #aiPanel {
+    display: none;
+    justify-content: center;
+    margin-top: 2px;
+  }
   #onlinePanel {
     display: none;
     flex-direction: column;
@@ -298,6 +303,10 @@
     <button id="modeAI" class="active">VS Computer</button>
     <button id="mode2P">2 Players</button>
     <button id="modeOnline">Online</button>
+  </div>
+
+  <div id="aiPanel">
+    <button id="aiLevelToggle" type="button">Bot: Medium</button>
   </div>
 
   <div id="onlinePanel">
@@ -513,6 +522,7 @@
       this.score = 0; this.respawnIn = 0;
       this.input = { fwd: false, back: false, left: false, right: false, fire: false };
       this.aiTurnGoal = 0; this.aiRepathIn = 0; this.aiNext = null; this.aiDodgeT = 0;
+      this.prevX = 0; this.prevY = 0; this.vx = 0; this.vy = 0;   // velocity (for AI lead-aim)
       this.buffs = { speed: 0, rapid: 0, bounce: 0 };  // remaining seconds each
       this.bf = 0;                  // buff bitmask (for render; synced to guests)
     }
@@ -527,6 +537,7 @@
       this.input.fwd = this.input.back = this.input.left = this.input.right = this.input.fire = false;
       this.aiTurnGoal = this.angle;
       this.aiRepathIn = 0; this.aiNext = null; this.aiDodgeT = 0;
+      this.prevX = this.x; this.prevY = this.y; this.vx = 0; this.vy = 0;
       this.buffs.speed = this.buffs.rapid = this.buffs.bounce = 0;
       this.bf = 0;
     }
@@ -597,6 +608,7 @@
   let roundOver = false;
   let lastWinner = null;        // winner player index | "draw" | null (synced to guest)
   let endTimer = 0;
+  let aiLevel = "medium";       // bot difficulty: "easy" | "medium" | "hard"
   let submode = "standing";     // "standing" (last alive wins) | "respawn" (deathmatch)
   let hostSubmode = "standing"; // host's pick before hosting
   const RESPAWN_DELAY = 2.0;    // seconds dead before respawning (deathmatch)
@@ -801,13 +813,55 @@
     return { c: cur % COLS, r: (cur - (cur % COLS)) / COLS };
   }
 
-  // ---- AI: hunt via pathfinding, grab runes, dodge bullets, aim & fire ----
+  // Aim heading at the target; Hard leads the shot using the target's velocity.
+  function aimAngle(self, target, hard) {
+    if (!hard) return Math.atan2(target.y - self.y, target.x - self.x);
+    const d = Math.hypot(target.x - self.x, target.y - self.y);
+    const t = d / BULLET_SPEED;                                   // time for a bullet to arrive
+    return Math.atan2((target.y + target.vy * t) - self.y, (target.x + target.vx * t) - self.x);
+  }
+
   function updateAI(self, dt) {
     if (!self.alive) return;
+    if (aiLevel === "easy") updateAIEasy(self, dt);
+    else updateAISmart(self, dt, aiLevel === "hard");
+  }
+
+  // EASY: aim & fire on line of sight, random wander otherwise. No pathing/dodge.
+  function updateAIEasy(self, dt) {
+    const target = nearestOpponent(self);
+    if (!target) return;
+    const los = hasLineOfSight(self.x, self.y, target.x, target.y);
+    let desired;
+    if (los) {
+      desired = Math.atan2(target.y - self.y, target.x - self.x);
+    } else {
+      self.aiRepathIn -= dt;
+      if (self.aiRepathIn <= 0) {
+        self.aiTurnGoal = self.angle + (Math.random() - 0.5) * Math.PI * 1.2;
+        self.aiRepathIn = 0.6 + Math.random() * 0.8;
+      }
+      desired = self.aiTurnGoal;
+    }
+    const diff = angleDiff(self.angle, desired);
+    const turn = TANK_TURN * dt;
+    self.angle += Math.max(-turn, Math.min(turn, diff));
+    const before = { x: self.x, y: self.y };
+    self.tryMove(TANK_SPEED * (self.buffs.speed > 0 ? SPEED_MULT : 1) * dt);
+    if (Math.hypot(self.x - before.x, self.y - before.y) < TANK_SPEED * dt * 0.3 && !los) {
+      self.aiTurnGoal = self.angle + (Math.random() < 0.5 ? 1 : -1) * (0.7 + Math.random());
+      self.aiRepathIn = 0.5;
+    }
+    if (los && Math.abs(diff) < 0.20 && self.canFire()) self.fire(bullets);
+  }
+
+  // MEDIUM / HARD: BFS-hunt, grab runes, dodge bullets, aim & fire (Hard leads shots + repaths faster).
+  function updateAISmart(self, dt, hard) {
     const target = nearestOpponent(self);
     if (!target) return;
     const los = hasLineOfSight(self.x, self.y, target.x, target.y);
     const targDist = Math.hypot(target.x - self.x, target.y - self.y);
+    const aimA = aimAngle(self, target, hard);
 
     self.aiDodgeT -= dt;
     const threat = incomingBullet(self);
@@ -821,7 +875,7 @@
     if (self.aiDodgeT > 0) {
       desired = self.aiTurnGoal; dodging = true;                   // commit the swerve briefly
     } else if (los && targDist < TILE * 6) {
-      desired = Math.atan2(target.y - self.y, target.x - self.x);  // close + visible: aim
+      desired = aimA;                                              // close + visible: aim
     } else {
       // pick a goal — a nearby rune detour, else the enemy — and path to it
       let gx = target.x, gy = target.y;
@@ -829,7 +883,7 @@
       if (rn && rn.dist < targDist * 0.9) { gx = rn.rune.x; gy = rn.rune.y; }
       self.aiRepathIn -= dt;
       if (self.aiRepathIn <= 0 || !self.aiNext) {
-        self.aiRepathIn = 0.25;
+        self.aiRepathIn = hard ? 0.12 : 0.25;
         self.aiNext = bfsNext(cellOf(self.x, self.y), cellOf(gx, gy));
       }
       if (self.aiNext) {
@@ -837,7 +891,7 @@
         if (Math.hypot(nx - self.x, ny - self.y) < TILE * 0.4) self.aiNext = null;  // reached step
         desired = Math.atan2(ny - self.y, nx - self.x);
       } else if (los) {
-        desired = Math.atan2(target.y - self.y, target.x - self.x);
+        desired = aimA;
       } else {
         self.aiTurnGoal = self.angle + (Math.random() - 0.5) * Math.PI;             // fallback wander
         desired = self.aiTurnGoal;
@@ -858,7 +912,8 @@
       }
     }
 
-    if (los && Math.abs(diff) < 0.22 && self.canFire()) self.fire(bullets);
+    const fireDiff = angleDiff(self.angle, aimA);
+    if (los && Math.abs(fireDiff) < 0.22 && self.canFire()) self.fire(bullets);
   }
 
   // ---- Player control ----
@@ -926,6 +981,12 @@
         endTimer += dt;
         if (endTimer > 0.7) endRound(alive[0] || null);
       }
+    }
+
+    // per-tank velocity (used by Hard bot's lead-aim)
+    if (dt > 0) for (const p of present) {
+      p.vx = (p.x - p.prevX) / dt; p.vy = (p.y - p.prevY) / dt;
+      p.prevX = p.x; p.prevY = p.y;
     }
   }
 
@@ -1438,6 +1499,7 @@
   const mode2PBtn = document.getElementById("mode2P");
   const modeOnlineBtn = document.getElementById("modeOnline");
   const onlinePanel = document.getElementById("onlinePanel");
+  const aiPanel = document.getElementById("aiPanel");
   const hostBtn = document.getElementById("hostBtn");
   const joinBtn = document.getElementById("joinBtn");
   const joinCode = document.getElementById("joinCode");
@@ -1460,6 +1522,7 @@
     mode2PBtn.classList.toggle("active", mode === "2p");
     modeOnlineBtn.classList.toggle("active", online);
     onlinePanel.style.display = online ? "flex" : "none";
+    aiPanel.style.display = mode === "ai" ? "flex" : "none";
   }
 
   function setControlsLegend() {
@@ -1504,6 +1567,27 @@
   modeAIBtn.addEventListener("click", () => setMode("ai"));
   mode2PBtn.addEventListener("click", () => setMode("2p"));
   modeOnlineBtn.addEventListener("click", () => setMode("lobby"));
+
+  // Bot difficulty (VS Computer)
+  const aiLevelToggle = document.getElementById("aiLevelToggle");
+  const AI_LEVELS = ["easy", "medium", "hard"];
+  const AI_DESC = {
+    easy: "Wanders the maze, shoots only on sight.",
+    medium: "Hunts you through the maze, dodges shots, grabs runes.",
+    hard: "Like Medium, but leads its shots and reacts faster.",
+  };
+  function updateAiLevelLabel() {
+    aiLevelToggle.textContent = "Bot: " + aiLevel.charAt(0).toUpperCase() + aiLevel.slice(1);
+    aiLevelToggle.title = AI_DESC[aiLevel];
+  }
+  aiLevelToggle.addEventListener("click", () => {
+    aiLevel = AI_LEVELS[(AI_LEVELS.indexOf(aiLevel) + 1) % AI_LEVELS.length];
+    updateAiLevelLabel();
+    try { localStorage.setItem("tm_ailevel", aiLevel); } catch (_) {}
+    aiLevelToggle.blur();
+  });
+  try { const sv = localStorage.getItem("tm_ailevel"); if (AI_LEVELS.includes(sv)) aiLevel = sv; } catch (_) {}
+  updateAiLevelLabel();
   const submodeToggle = document.getElementById("submodeToggle");
   const modeHint = document.getElementById("modeHint");
   const SUBMODE_HINT = {
@@ -1692,6 +1776,8 @@
     window.__tmMode = () => mode;
     window.__tmPow = () => powerups.map((r) => ({ type: r.type, x: Math.round(r.x), y: Math.round(r.y) }));
     window.__tmBfs = (fc, fr, tc, tr) => bfsNext({ c: fc, r: fr }, { c: tc, r: tr });
+    window.__tmAi = () => aiLevel;
+    window.__tmSetAi = (lvl) => { aiLevel = lvl; };
     window.__tmFloors = () => floorCells.map((c) => [c.c, c.r]);
     window.__tmIsWall = (c, r) => isWallCell(c, r);
     // drop a rune onto a tank so the next sim tick picks it up (test helper)
